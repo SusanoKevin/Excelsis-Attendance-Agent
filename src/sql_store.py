@@ -147,14 +147,48 @@ class SQLDataStore:
 
     @staticmethod
     def _q(name: str) -> str:
-        """Bracket-quote a SQL Server identifier."""
-        return f"[{name.replace(']', ']]')}]"
+        """Bracket-quote a SQL Server identifier. Dotted names (e.g. an alias-
+        qualified column like 'a.UserId', needed when PRIMARY_TABLE is a join)
+        are quoted part-by-part rather than as one bracketed blob."""
+        return ".".join(f"[{part.replace(']', ']]')}]" for part in name.split("."))
+
+    def _table_expr(self) -> str:
+        """FROM-clause source for structured queries. A bare table name is
+        bracket-quoted as before; a value containing whitespace is treated as
+        a full FROM-clause expression (e.g. a JOIN across multiple tables) and
+        used as-is, so PRIMARY_TABLE isn't limited to a single physical table."""
+        table = self._require_table()
+        if table.strip() and any(c.isspace() for c in table):
+            if ";" in table:
+                raise RuntimeError(
+                    "PRIMARY_TABLE must not contain a semicolon. Configure it as a "
+                    "plain table name (e.g. 'Attendance') or a single FROM-clause "
+                    "expression (e.g. 'Attendance a JOIN Users u ON a.UserId=u.UserId')."
+                )
+            return table
+        return self._q(table)
+
+    def _exec_primary(self, sql: str, params: tuple = ()) -> pd.DataFrame:
+        """Run a structured-tool query against PRIMARY_TABLE. Translates any
+        failure — a misconfigured table/join, a wrong column name, etc. — into
+        a message pointing at the schema-driven fallback, since these queries
+        are built from admin config that may not match the real schema."""
+        try:
+            return self._exec(sql, params)
+        except PermissionError:
+            raise
+        except Exception as e:
+            raise RuntimeError(
+                f"Structured query against PRIMARY_TABLE ('{self._table}') failed: {e}. "
+                "Use retrieve_schema to inspect the real schema, then run_sql_query "
+                "to answer this directly instead."
+            ) from e
 
     def _build_period_clause(
         self, period: str, date_from: str | None, date_to: str | None, params: list
     ) -> str:
         dc = self._q(self._date_col)
-        t  = self._q(self._table)
+        t  = self._table_expr()
         if date_from or date_to:
             parts: list[str] = []
             if date_from: parts.append(f"AND {dc} >= ?"); params.append(date_from)
@@ -197,7 +231,11 @@ class SQLDataStore:
 
     def _require_table(self) -> str:
         if not self._table:
-            raise RuntimeError("PRIMARY_TABLE is not configured. Set PRIMARY_TABLE in your .env file.")
+            raise RuntimeError(
+                "PRIMARY_TABLE is not configured. Set it in your .env file to a table "
+                "name or a FROM-clause join expression, or use retrieve_schema and "
+                "run_sql_query to answer this directly instead."
+            )
         return self._table
 
     def _exec(self, sql: str, params: tuple = (), database: str | None = None) -> pd.DataFrame:
@@ -211,6 +249,16 @@ class SQLDataStore:
     def _query(self, sql: str, params: tuple = (), database: str | None = None) -> pd.DataFrame:
         _assert_select_only(sql)
         return self._exec(sql, params, database)
+
+    def schema_columns(self, database: str) -> pd.DataFrame:
+        """Return INFORMATION_SCHEMA.COLUMNS for internal schema introspection only."""
+        return self._exec(
+            "SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME,"
+            " DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, IS_NULLABLE"
+            " FROM INFORMATION_SCHEMA.COLUMNS"
+            " ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION",
+            database=database,
+        )
 
     def ping(self, database: str | None = None) -> bool:
         try:
@@ -229,12 +277,12 @@ class SQLDataStore:
         if cached is not None:
             return cached
 
-        t  = self._q(self._table)
+        t  = self._table_expr()
         mc = self._q(self._metric_col)
         dc = self._q(self._date_col)
         ec = self._q(self._entity_col)
         pv = self._positive_val
-        df = self._exec(f"""
+        df = self._exec_primary(f"""
         SELECT
             COUNT(*)                                                          AS total_records,
             COUNT(DISTINCT {ec})                                              AS entity_count,
@@ -251,7 +299,7 @@ class SQLDataStore:
 
         first_dim = self._group_cols[0] if self._group_cols else None
         first_dim_q = self._q(first_dim) if first_dim else None
-        dims_df = self._exec(
+        dims_df = self._exec_primary(
             f"SELECT DISTINCT {first_dim_q} FROM {t} "
             f"WHERE {first_dim_q} IS NOT NULL ORDER BY {first_dim_q}"
         ) if first_dim else pd.DataFrame()
@@ -290,7 +338,7 @@ class SQLDataStore:
             else:
                 raise ValueError(f"Invalid group_by '{group_by}'. Valid: {', '.join(self._group_expr)}")
         col_expr, col_alias = self._group_expr[group_by]
-        t  = self._q(self._table)
+        t  = self._table_expr()
         mc = self._q(self._metric_col)
         pv = self._positive_val
         params: list = [pv, pv]
@@ -303,7 +351,7 @@ class SQLDataStore:
             segment_clause = f"AND {grp0_q} IN ({_ph(len(segments))})"
             params.extend(segments)
 
-        result = self._exec(f"""
+        result = self._exec_primary(f"""
         SELECT
             {col_expr}  AS [{col_alias}],
             COUNT(*)                                                          AS total,
@@ -334,7 +382,7 @@ class SQLDataStore:
         if cached is not None:
             return cached
 
-        t   = self._q(self._table)
+        t   = self._table_expr()
         mc  = self._q(self._metric_col)
         ec  = self._q(self._entity_col)
         enc = self._q(self._entity_name_col)
@@ -352,7 +400,7 @@ class SQLDataStore:
         params.append(pv)
         params.append(threshold)
 
-        result = self._exec(f"""
+        result = self._exec_primary(f"""
         SELECT
             {ec}                                                              AS entity_id,
             MAX({enc})                                                        AS label,
@@ -382,12 +430,12 @@ class SQLDataStore:
         if cached is not None:
             return cached
 
-        t   = self._q(self._table)
+        t   = self._table_expr()
         mc  = self._q(self._metric_col)
         ec  = self._q(self._entity_col)
         pv  = self._positive_val
         week_expr = self._group_expr["week"][0]
-        df = self._exec(f"""
+        df = self._exec_primary(f"""
         SELECT
             {ec}                                        AS entity_id,
             {week_expr}                                 AS week,

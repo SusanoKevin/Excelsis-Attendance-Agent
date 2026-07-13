@@ -136,6 +136,43 @@ class TestPromptValidation:
         assert "cannot be empty" in result
 
 
+class _FailingStore:
+    """Minimal store double whose methods raise RuntimeError, simulating a
+    misconfigured/failing PRIMARY_TABLE query."""
+
+    _MSG = "PRIMARY_TABLE query failed. Use retrieve_schema and run_sql_query instead."
+
+    def compute_stats(self, *a, **k):
+        raise RuntimeError(self._MSG)
+
+    def get_threshold_alerts(self, *a, **k):
+        raise RuntimeError(self._MSG)
+
+    def summary(self):
+        raise RuntimeError(self._MSG)
+
+
+class TestPrimaryTableFallbackInTools:
+    """Tools must surface the RuntimeError as a normal result (so the agent
+    can retry with a different tool) instead of letting it propagate and end
+    the turn, which is what happens if an exception escapes a @tool function."""
+
+    def test_get_summary_returns_message_instead_of_raising(self):
+        cfg = _tool_config(store=_FailingStore())
+        result = get_summary.invoke({}, config=cfg)
+        assert "retrieve_schema" in result
+
+    def test_query_data_returns_message_instead_of_raising(self):
+        cfg = _tool_config(store=_FailingStore())
+        result = query_data.invoke({}, config=cfg)
+        assert "retrieve_schema" in result
+
+    def test_get_threshold_alerts_returns_message_instead_of_raising(self):
+        cfg = _tool_config(store=_FailingStore())
+        result = get_threshold_alerts.invoke({}, config=cfg)
+        assert "retrieve_schema" in result
+
+
 class TestToolResultSerialization:
     """_df_to_text must not crash on column types SQL Server commonly returns
     (date/datetime), since run_sql_query passes back whatever raw dtypes the

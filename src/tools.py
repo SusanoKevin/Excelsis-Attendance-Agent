@@ -89,7 +89,10 @@ def query_data(
     if store is None:
         return "No data store connected.", {}
 
-    df = store.compute_stats(group_by, period)
+    try:
+        df = store.compute_stats(group_by, period)
+    except RuntimeError as e:
+        return str(e), {}
     return _df_to_text(df), _df_to_artifact(df)
 
 
@@ -108,7 +111,10 @@ def get_threshold_alerts(
     if store is None:
         return "No data store connected.", {}
 
-    df = store.get_threshold_alerts(threshold=threshold)
+    try:
+        df = store.get_threshold_alerts(threshold=threshold)
+    except RuntimeError as e:
+        return str(e), {}
     if df.empty:
         return f"No entities below {threshold}% metric threshold.", {}
     return _df_to_text(df), _df_to_artifact(df)
@@ -124,7 +130,10 @@ def get_summary(config: RunnableConfig = None) -> str:
     if store is None:
         return "No data store connected."
 
-    return json.dumps(store.summary(), indent=2)
+    try:
+        return json.dumps(store.summary(), indent=2)
+    except RuntimeError as e:
+        return str(e)
 
 
 @tool
@@ -210,8 +219,11 @@ def compare_periods(
     if store is None:
         return "No data store connected.", {}
 
-    df_a = store.compute_stats("", period_a)
-    df_b = store.compute_stats("", period_b)
+    try:
+        df_a = store.compute_stats("", period_a)
+        df_b = store.compute_stats("", period_b)
+    except RuntimeError as e:
+        return str(e), {}
 
     if df_a.empty and df_b.empty:
         return "No data available for either period.", {}
@@ -246,7 +258,10 @@ def compare_segments(
     if store is None:
         return "No data store connected.", {}
 
-    df = store.compute_stats("", "all", segments=[segment_a, segment_b])
+    try:
+        df = store.compute_stats("", "all", segments=[segment_a, segment_b])
+    except RuntimeError as e:
+        return str(e), {}
     if df.empty:
         return f"No data found for segments '{segment_a}' or '{segment_b}'.", {}
     return _df_to_text(df), _df_to_artifact(df)
@@ -322,7 +337,10 @@ def statistical_summary(
     store = _store(config)
     if store is None:
         return "No data store connected."
-    result = store.compute_statistical_summary(group_by)
+    try:
+        result = store.compute_statistical_summary(group_by)
+    except RuntimeError as e:
+        return str(e)
     return json.dumps(result, indent=2)
 
 
@@ -342,7 +360,10 @@ def detect_anomalies(
     store = _store(config)
     if store is None:
         return "No data store connected.", {}
-    df = store.detect_anomalies(group_by, sigma)
+    try:
+        df = store.detect_anomalies(group_by, sigma)
+    except RuntimeError as e:
+        return str(e), {}
     if df.empty:
         return f"No anomalies detected beyond {sigma}σ from the mean.", {}
     return _df_to_text(df), _df_to_artifact(df)
@@ -365,7 +386,10 @@ def get_top_n(
     store = _store(config)
     if store is None:
         return "No data store connected.", {}
-    df = store.get_top_n(group_by, n, ascending)
+    try:
+        df = store.get_top_n(group_by, n, ascending)
+    except RuntimeError as e:
+        return str(e), {}
     if df.empty:
         return "No data available.", {}
     return _df_to_text(df), _df_to_artifact(df)
@@ -383,7 +407,10 @@ def analyze_trend(
     store = _store(config)
     if store is None:
         return "No data store connected."
-    result = store.analyze_weekly_trend()
+    try:
+        result = store.analyze_weekly_trend()
+    except RuntimeError as e:
+        return str(e)
     return json.dumps(result, indent=2)
 
 
