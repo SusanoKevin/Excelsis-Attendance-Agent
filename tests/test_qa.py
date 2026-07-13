@@ -12,6 +12,7 @@ from src.agent import ExcelsisAgent
 from src.prompt_guard import check_token_budget, validate_message
 from src.security import ADMIN_USER
 from src.tools import (
+    _df_to_text,
     get_summary,
     get_threshold_alerts,
     get_top_n,
@@ -133,6 +134,35 @@ class TestPromptValidation:
         cfg    = _tool_config(store=None)
         result = run_sql_query.invoke({"sql": "   "}, config=cfg)
         assert "cannot be empty" in result
+
+
+class TestToolResultSerialization:
+    """_df_to_text must not crash on column types SQL Server commonly returns
+    (date/datetime), since run_sql_query passes back whatever raw dtypes the
+    LLM's own ad-hoc SELECT produces — unlike the hardcoded queries in
+    sql_store.py, which pre-format dates as strings."""
+
+    def test_date_column_serializes(self):
+        import datetime
+
+        df = pd.DataFrame({
+            "AttendanceDate": [datetime.date(2026, 7, 10), datetime.date(2026, 7, 11)],
+            "Status": [True, False],
+        })
+        result = _df_to_text(df)
+        payload = json.loads(result)
+        assert payload["total_rows"] == 2
+
+    def test_datetime_column_serializes(self):
+        import datetime
+
+        df = pd.DataFrame({
+            "CheckinDate": [datetime.datetime(2026, 7, 10, 8, 30, 0)],
+            "Count": [1],
+        })
+        result = _df_to_text(df)
+        payload = json.loads(result)
+        assert payload["total_rows"] == 1
 
 
 @pytest.mark.integration

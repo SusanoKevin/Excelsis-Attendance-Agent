@@ -52,7 +52,7 @@ def _df_to_text(df: pd.DataFrame, max_rows: int = 50) -> str:
             "The full table is already displayed to the user. "
             "Write analysis only — do not reproduce or reformat this data."
         ),
-    })
+    }, default=str)
 
 
 def _df_to_artifact(df: pd.DataFrame, max_rows: int = 50) -> dict:
