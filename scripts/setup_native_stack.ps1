@@ -84,6 +84,7 @@ Write-Host "--- Writing native Grafana provisioning ---"
 $provDir = Join-Path $Tools "grafana-provisioning"
 New-Item -ItemType Directory -Force -Path (Join-Path $provDir "datasources") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $provDir "dashboards") | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $provDir "alerting") | Out-Null
 
 Copy-Item -Path (Join-Path $Root "docker\grafana\provisioning\datasources\datasources.yaml") `
     -Destination (Join-Path $provDir "datasources\datasources.yaml") -Force
@@ -106,7 +107,7 @@ providers:
 Write-Host ""
 Write-Host "Native stack ready:"
 Write-Host "  Prometheus -> $Tools\prometheus\prometheus.exe"
-Write-Host "  Grafana    -> $Tools\grafana\bin\grafana-server.exe"
+Write-Host "  Grafana    -> $Tools\grafana\bin\grafana.exe server"
 Write-Host "  Garnet     -> $($garnetExe.FullName)"
 Write-Host ""
 Write-Host "Run start.ps1 to launch everything."

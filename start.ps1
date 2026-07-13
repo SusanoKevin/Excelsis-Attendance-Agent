@@ -26,15 +26,18 @@ if (-not (Test-Path $Tools)) {
 
     Write-Host "Starting Grafana on :3000 ..."
     $env:GF_PATHS_PROVISIONING = "$Tools\grafana-provisioning"
-    $grafana = Start-Process -NoNewWindow -PassThru -FilePath "$Tools\grafana\bin\grafana-server.exe" `
+    $grafana = Start-Process -NoNewWindow -PassThru -FilePath "$Tools\grafana\bin\grafana.exe" `
+        -ArgumentList "server" `
         -WorkingDirectory "$Tools\grafana"
     $processes += $grafana
 
     $garnetExe = Get-ChildItem -Path "$Tools\garnet" -Filter "*.exe" -Recurse |
         Where-Object { $_.Name -like "*Garnet*" } | Select-Object -First 1
     Write-Host "Starting Garnet on :6379 ..."
+    # --lua: python-limits' Redis storage backend (used by slowapi) requires EVALSHA support,
+    # which Garnet disables by default.
     $garnet = Start-Process -NoNewWindow -PassThru -FilePath $garnetExe.FullName `
-        -ArgumentList "--port 6379" `
+        -ArgumentList "--port 6379 --lua" `
         -WorkingDirectory $garnetExe.DirectoryName
     $processes += $garnet
 }
