@@ -132,6 +132,8 @@ Databases created: `education_db` (16 tables) and `finance_db` (18 tables).
 bash start.sh          # FastAPI :8000 + React :5173
 ```
 
+On Windows, `start.ps1` is the equivalent (FastAPI + Vite, plus Prometheus/Grafana/Garnet if `tools/` exists — run `scripts/setup_native_stack.ps1` once first to download those portable binaries).
+
 Or individually:
 ```bash
 source .venv/bin/activate

@@ -20,7 +20,7 @@ AI-powered data analyst for the Excelsis360 platform, built on a LangGraph ReAct
 - **Persistent conversation history** — per-user chat history stored in a SQLite file (`CHAT_DB`) via LangGraph's `SqliteSaver` checkpointer; survives restarts and is shared across Uvicorn workers
 - **Jupyter notebook** — full interactive analysis environment that shares the same `src/` backend
 - **MCP server** — exposes Excelsis360 data tools to Claude Code via FastMCP
-- **Observability** — Prometheus metrics (`agent_tool_invocations_total`, `agent_query_duration_seconds`, `agent_query_errors_total`, `cache_hits_total`, `cache_misses_total`) via `src/tracker.py`; Grafana dashboards included in `docker/`; `/metrics` scrape endpoint always active
+- **Observability** — Prometheus metrics (`agent_tool_invocations_total`, `agent_query_duration_seconds`, `agent_query_errors_total`, `cache_hits_total`, `cache_misses_total`) via `src/tracker.py`; Grafana dashboards in `docker/grafana/`; `/metrics` scrape endpoint always active. Prometheus, Grafana, and Garnet (Redis-compatible cache) run as native Windows processes via `start.ps1` — see [Native Observability Stack](#native-observability-stack)
 
 ---
 
@@ -250,6 +250,19 @@ Use `--server .\SQLEXPRESS` if running SQL Server Express, or `--server myhost` 
 | `small` | 1 000 | 100 000 | ~10 s |
 | `medium` | 5 000 | 500 000 | ~1–2 min |
 | `large` | 20 000 | 2 000 000 | ~5–10 min |
+
+---
+
+## Native Observability Stack
+
+Prometheus, Grafana, and [Garnet](https://github.com/microsoft/garnet) (Microsoft's RESP-protocol-compatible cache store, used in place of Redis) run as plain native Windows processes — no Docker, no installers, no Windows services. `docker/docker-compose.yml` remains available as an alternative if you'd rather run these in containers instead.
+
+```bash
+# One-time: downloads portable binaries into tools/ (gitignored)
+powershell -File scripts/setup_native_stack.ps1
+```
+
+Then `start.ps1` launches Prometheus (`:9090`), Grafana (`:3000`), and Garnet (`:6379`) alongside the FastAPI/Vite dev servers, and stops all of them together on Ctrl-C. Grafana reuses the same dashboards and datasource provisioning already in `docker/grafana/`; log in at `http://localhost:3000` with `admin`/`admin` (forced reset on first login). Set `REDIS_URI=redis://localhost:6379` in `.env` to point the rate limiter at Garnet instead of the in-memory fallback.
 
 ---
 
