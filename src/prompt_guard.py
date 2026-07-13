@@ -24,9 +24,26 @@ _INJECTION_PATTERNS = re.compile(
 )
 
 
+# Cyrillic/Greek letters visually confusable with the Latin letters used in
+# _INJECTION_PATTERNS. NFKC does not fold these — they're distinct scripts,
+# not compatibility variants of the same character.
+_CONFUSABLES = str.maketrans({
+    "а": "a", "А": "A", "е": "e", "Е": "E", "о": "o", "О": "O",
+    "р": "p", "Р": "P", "с": "c", "С": "C", "х": "x", "Х": "X",
+    "і": "i", "І": "I", "у": "y", "У": "Y", "к": "k", "К": "K",
+    "м": "m", "М": "M", "н": "h", "Н": "H", "т": "t", "Т": "T",
+    "в": "b", "В": "B",
+    "ο": "o", "Ο": "O", "ν": "v", "Ν": "N", "α": "a", "Α": "A",
+})
+
+
 def _normalize(text: str) -> str:
-    """NFKC-normalize and collapse whitespace to defeat encoding/spacing bypass attempts."""
+    """NFKC-normalize, fold confusables, and collapse whitespace (including zero-width/
+    format chars, treated as separators rather than deleted) to defeat encoding/spacing/
+    homoglyph bypass attempts."""
     text = unicodedata.normalize("NFKC", text)
+    text = "".join(" " if unicodedata.category(ch) == "Cf" else ch for ch in text)
+    text = text.translate(_CONFUSABLES)
     return re.sub(r"\s+", " ", text)
 
 
