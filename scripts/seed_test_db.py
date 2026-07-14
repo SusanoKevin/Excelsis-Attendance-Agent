@@ -17,12 +17,13 @@ from __future__ import annotations
 import argparse
 import random
 from datetime import date, timedelta
-from urllib.parse import quote_plus
 
 import numpy as np
 import pandas as pd
 from faker import Faker
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
+
+from _db_utils import build_engine
 
 # ── Connection defaults (overridable via CLI args) ─────────────────────────────
 
@@ -178,19 +179,9 @@ EXP_STATUS_W    = [0.50, 0.25, 0.10, 0.15]
 # ── Engine / insert helpers ────────────────────────────────────────────────────
 
 def _engine(database: str):
-    if AUTH_METHOD == "windows":
-        dsn = (
-            f"DRIVER={DRIVER};SERVER={SERVER};DATABASE={database};"
-            f"Trusted_Connection=yes;TrustServerCertificate=yes;"
-        )
-    else:
-        dsn = (
-            f"DRIVER={DRIVER};SERVER={SERVER};DATABASE={database};"
-            f"UID={USERNAME};PWD={PASSWORD};TrustServerCertificate=yes;"
-        )
-    return create_engine(
-        f"mssql+pyodbc:///?odbc_connect={quote_plus(dsn)}",
-        fast_executemany=True,
+    return build_engine(
+        database, SERVER, driver=DRIVER, auth_method=AUTH_METHOD,
+        username=USERNAME, password=PASSWORD, fast_executemany=True,
     )
 
 

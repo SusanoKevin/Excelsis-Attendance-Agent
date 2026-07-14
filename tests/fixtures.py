@@ -1,18 +1,13 @@
 from __future__ import annotations
 
-import logging
 import time
 import uuid
 from datetime import timedelta
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-logger = logging.getLogger(__name__)
-
 VALID_STATUSES = {"active", "inactive", "partial", "exempt"}
-_GLOB_PATTERNS = ("*.csv", "*.xlsx", "*.xls", "*.parquet")
 
 
 class _TTLCache:
@@ -40,32 +35,9 @@ class _TTLCache:
 class SampleDataStore:
     """In-memory pandas-backed store used exclusively as a test fixture."""
 
-    def __init__(self, data_path: str | None = None) -> None:
+    def __init__(self) -> None:
         self._datasets: dict[str, dict] = {}
         self._cache = _TTLCache(ttl=300)
-        if data_path is not None:
-            self._load_from_path(Path(data_path))
-
-    def _load_from_path(self, root: Path) -> None:
-        if not root.exists():
-            return
-        paths = [root] if root.is_file() else sorted(p for g in _GLOB_PATTERNS for p in root.glob(g))
-        for p in paths:
-            if not p.is_file():
-                continue
-            try:
-                suf = p.suffix.lower()
-                if suf == ".csv":
-                    raw = pd.read_csv(p)
-                elif suf in (".xlsx", ".xls"):
-                    raw = pd.read_excel(p)
-                elif suf == ".parquet":
-                    raw = pd.read_parquet(p)
-                else:
-                    continue
-                self.ingest_df(raw, name=p.stem)
-            except Exception as ex:
-                logger.warning("Could not load %s: %s", p, ex)
 
     def ingest_df(self, df: pd.DataFrame, name: str = "uploaded") -> dict:
         did = str(uuid.uuid4())
@@ -80,7 +52,6 @@ class SampleDataStore:
         df["day_of_week"] = df["date"].dt.day_name()
         self._datasets[did] = {"name": name, "df": df}
         self._cache.clear()
-        logger.info("Ingested '%s': %d rows → id=%s", name, len(df), did[:8])
         return {"dataset_id": did, "rows": len(df), "columns": list(df.columns)}
 
     def merged(self) -> pd.DataFrame:

@@ -8,9 +8,9 @@ Sections targeted (all below 75%):
 """
 from __future__ import annotations
 
-from urllib.parse import quote_plus
+from sqlalchemy import text
 
-from sqlalchemy import create_engine, text
+from _db_utils import build_engine
 
 SERVER   = "localhost,1433"
 USERNAME = "sa"
@@ -27,11 +27,9 @@ SECTION_TARGETS = [
 
 
 def _engine():
-    dsn = (
-        f"DRIVER={DRIVER};SERVER={SERVER};DATABASE=education_db;"
-        f"UID={USERNAME};PWD={PASSWORD};TrustServerCertificate=yes;"
+    return build_engine(
+        "education_db", SERVER, driver=DRIVER, username=USERNAME, password=PASSWORD,
     )
-    return create_engine(f"mssql+pyodbc:///?odbc_connect={quote_plus(dsn)}")
 
 
 def main() -> None:

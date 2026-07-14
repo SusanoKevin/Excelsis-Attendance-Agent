@@ -44,6 +44,4 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "faker>=25.0.0",
-    "openpyxl>=3.1.0",
-    "pyarrow>=14.0.0",
 ]

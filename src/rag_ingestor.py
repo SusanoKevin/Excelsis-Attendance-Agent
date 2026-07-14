@@ -35,15 +35,7 @@ def ingest_schemas(
 
     for db in sql_store.databases:
         try:
-            df = sql_store._exec(
-                """
-                SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME,
-                       DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, IS_NULLABLE
-                FROM   INFORMATION_SCHEMA.COLUMNS
-                ORDER  BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION
-                """,
-                database=db,
-            )
+            df = sql_store.schema_columns(db)
         except Exception as e:
             logger.warning("Schema ingest skipped for %s: %s", db, e)
             continue

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 from pathlib import Path
@@ -102,5 +103,7 @@ def knowledge_lookup(query: str) -> str:
 
 
 if __name__ == "__main__":
-    print(f"Starting Excelsis MCP server as '{MCP_USER.user_id}'")
+    # log to stderr, not stdout — FastMCP's stdio transport uses stdout for JSON-RPC
+    logging.basicConfig(level=logging.INFO)
+    logging.getLogger(__name__).info("Starting Excelsis MCP server as '%s'", MCP_USER.user_id)
     mcp.run()

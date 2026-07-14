@@ -1,3 +1,4 @@
+import type { Key } from 'react'
 import {
   Area, AreaChart, CartesianGrid, ReferenceLine,
   ResponsiveContainer, Tooltip, XAxis, YAxis,
@@ -15,7 +16,7 @@ interface Props {
 interface DotProps {
   cx?:     number
   cy?:     number
-  key?:    string | number
+  key?:    Key | null
   payload?: WeeklyStat
 }
 
@@ -81,7 +82,7 @@ export default function WeeklyTrendChart({ data, loading, selectedWeek, onSelect
             )
           }}
           activeDot={{ r: 5, cursor: onSelect ? 'pointer' : 'default',
-            onClick: (_: unknown, payload: { activePayload?: Array<{ payload: WeeklyStat }> }) =>
+            onClick: (_: unknown, payload: any) =>
               onSelect?.(payload?.activePayload?.[0]?.payload?.week ?? '') }}
         />
       </AreaChart>

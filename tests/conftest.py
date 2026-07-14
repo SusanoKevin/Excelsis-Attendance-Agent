@@ -1,4 +1,7 @@
 import pytest
+from dotenv import load_dotenv
+
+load_dotenv()  # must run before any src.* imports that read env vars
 
 
 def pytest_addoption(parser):

@@ -2,20 +2,14 @@ import { useState } from 'react'
 import WeeklyTrendChart from './charts/WeeklyTrendChart'
 import { AlertItem, DrillLevel, WeeklyStat } from '../types'
 import { ChartSelection } from '../hooks/useChartSelection'
-import { C, METRIC_THRESHOLD } from '../lib/constants'
+import { C, COLOR_TIER, METRIC_THRESHOLD, rateTextClass } from '../lib/constants'
 
 type SortCol = 'positive_count' | 'metric_rate'
 type SortDir = 'asc' | 'desc'
 
-function rateColor(rate: number) {
-  if (rate < 70) return 'text-danger'
-  if (rate < 80) return 'text-warning'
-  return 'text-success'
-}
-
 function rowStyle(rate: number): string {
   const base = 'border-b border-arctic-mist transition-colors'
-  if (rate < 70) return `${base} border-l-4 border-l-danger bg-red-50 hover:bg-red-100/60`
+  if (rate < COLOR_TIER.danger) return `${base} border-l-4 border-l-danger bg-red-50 hover:bg-red-100/60`
   return `${base} border-l-4 border-l-warning hover:bg-arctic-mist/50`
 }
 
@@ -37,7 +31,7 @@ function Sparkline({ points, rate }: { points: (number | null)[], rate: number }
   return (
     <svg width={W} height={H} className="overflow-visible" aria-hidden="true">
       <path d={segs.join(' ')} fill="none"
-        stroke={rate < 70 ? C.danger : C.warning}
+        stroke={rate < COLOR_TIER.danger ? C.danger : C.warning}
         strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   )
@@ -126,7 +120,7 @@ export default function DrilldownPanel({
                     <tr key={s.entity_id} className={`${rowStyle(s.metric_rate)}${highlighted ? ' ring-1 ring-inset ring-link-blue/30' : ''}`}>
                       <td className="px-5 py-3 text-carbon">{s.label ?? `#${s.entity_id}`}</td>
                       <td className="px-5 py-3 text-right text-pewter font-mono text-xs">{s.positive_count}</td>
-                      <td className={`px-5 py-3 text-right font-mono text-xs font-medium ${rateColor(s.metric_rate)}`}>
+                      <td className={`px-5 py-3 text-right font-mono text-xs font-medium ${rateTextClass(s.metric_rate)}`}>
                         {s.metric_rate}%
                       </td>
                       <td className="px-5 py-3">

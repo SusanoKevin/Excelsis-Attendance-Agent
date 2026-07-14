@@ -44,9 +44,13 @@ def _validate_startup(store: SQLDataStore) -> None:
         )
 
     ollama_base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+    ollama_api_key = os.environ.get("OLLAMA_API_KEY", "")
     ollama_ok = False
     try:
-        urllib.request.urlopen(f"{ollama_base_url}/api/tags", timeout=3)
+        req = urllib.request.Request(f"{ollama_base_url}/api/tags")
+        if ollama_api_key:
+            req.add_header("Authorization", f"Bearer {ollama_api_key}")
+        urllib.request.urlopen(req, timeout=3)
         ollama_ok = True
     except Exception:
         logger.warning("Ollama not reachable at %s — agent responses will fail", ollama_base_url)

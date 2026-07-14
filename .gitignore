@@ -19,3 +19,10 @@ web/node_modules/
 web/dist/
 .DS_Store
 github personal access token
+Github Personal Access Token.txt
+chat.db
+chat.db-shm
+chat.db-wal
+*.log
+*.egg-info/
+tools/

@@ -289,9 +289,14 @@ class TestToolValidation:
 # ─── Per-User History Isolation ───────────────────────────────────────────────
 
 class TestAgentHistoryIsolation:
-    """Each user must have independent conversation history."""
+    """Each user must have independent conversation history.
 
-    def test_histories_are_separate(self):
+    History is persisted via a LangGraph SqliteSaver checkpointer keyed by
+    thread_id=user.user_id (see CLAUDE.md); there is no in-process history
+    dict or TTL eviction to test against anymore.
+    """
+
+    def test_thread_ids_are_isolated_per_user(self):
         from src.agent import ExcelsisAgent
         from src.security import UserContext
 
@@ -299,36 +304,12 @@ class TestAgentHistoryIsolation:
         user_a = UserContext(user_id="alice")
         user_b = UserContext(user_id="bob")
 
-        agent._append_history("alice", "hello alice", "hi alice")
-        agent._append_history("bob",   "hello bob",   "hi bob")
+        config_a = agent._build_config(user_a)
+        config_b = agent._build_config(user_b)
 
-        assert "alice" in agent._histories
-        assert "bob"   in agent._histories
-
-        alice_msgs = [m.content for m in agent._histories["alice"]["messages"]]
-        bob_msgs   = [m.content for m in agent._histories["bob"]["messages"]]
-
-        assert "hello alice" in alice_msgs
-        assert "hello bob"   in bob_msgs
-        assert "hello alice" not in bob_msgs
-        assert "hello bob"   not in alice_msgs
-
-    def test_history_eviction_by_ttl(self):
-        import time
-        from src.agent import ExcelsisAgent, _HISTORY_TTL
-        from src.security import UserContext
-
-        agent = ExcelsisAgent()
-        agent._append_history("old_user", "question", "answer")
-
-        # Artificially age the entry past TTL
-        agent._histories["old_user"]["last_active"] = time.monotonic() - _HISTORY_TTL - 1
-
-        # Trigger eviction by adding a new entry
-        agent._append_history("new_user", "q", "a")
-
-        assert "old_user" not in agent._histories
-        assert "new_user" in agent._histories
+        assert config_a["configurable"]["thread_id"] == "alice"
+        assert config_b["configurable"]["thread_id"] == "bob"
+        assert config_a["configurable"]["thread_id"] != config_b["configurable"]["thread_id"]
 
 
 # ─── TTL Cache Thread Safety ──────────────────────────────────────────────────
