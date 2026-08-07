@@ -1,6 +1,8 @@
 # Excelsis 360 — Data Analyst Agent
 
-AI-powered data analyst for the Excelsis360 platform, built on a LangGraph ReAct agent (Ollama local LLMs), SQL Server data backend, and a FastAPI + React full-stack web interface.
+**Ask your database a question in plain English, get a grounded, cited answer streamed back token-by-token.** Deployed in production across 100+ educational institutions, this agent turns SQL Server data into conversational insight — no BI dashboard required, no hallucinated numbers.
+
+A full-stack AI data analyst built on a LangGraph ReAct agent (local LLMs via Ollama), a SQL Server backend, and a FastAPI + React web interface — with RAG-grounded answers, JWT-secured multi-user access, and a native Prometheus/Grafana observability stack.
 
 ---
 
@@ -20,7 +22,7 @@ AI-powered data analyst for the Excelsis360 platform, built on a LangGraph ReAct
 - **Persistent conversation history** — per-user chat history stored in a SQLite file (`CHAT_DB`) via LangGraph's `SqliteSaver` checkpointer; survives restarts and is shared across Uvicorn workers
 - **Jupyter notebook** — full interactive analysis environment that shares the same `src/` backend
 - **MCP server** — exposes Excelsis360 data tools to Claude Code via FastMCP
-- **Observability** — Prometheus metrics (`agent_tool_invocations_total`, `agent_query_duration_seconds`, `agent_query_errors_total`, `cache_hits_total`, `cache_misses_total`) via `src/tracker.py`; Grafana dashboards included in `docker/`; `/metrics` scrape endpoint always active
+- **Observability** — Prometheus metrics (`agent_tool_invocations_total`, `agent_query_duration_seconds`, `agent_query_errors_total`, `cache_hits_total`, `cache_misses_total`) via `src/tracker.py`; Grafana dashboards provisioned from `tools/grafana-provisioning/`; `/metrics` scrape endpoint always active — see [Observability Stack](#observability-stack)
 
 ---
 
@@ -80,15 +82,19 @@ AI-powered data analyst for the Excelsis360 platform, built on a LangGraph ReAct
 │       ├── lib/          # useChat, suggestions
 │       └── api/client.ts # Axios instance + SSE streaming helper
 │
-├── docker/               # Local test infrastructure
-│   └── docker-compose.yml  # SQL Server 2022 container (education_db + finance_db)
+├── tools/                # Native (non-Docker) observability stack binaries — gitignored
+│   │                     # except grafana-provisioning/; see Observability Stack below
+│   ├── garnet/           # Microsoft Garnet — Redis-protocol-compatible cache/server
+│   ├── prometheus/       # Prometheus binary + scrape config
+│   ├── grafana/          # Grafana binary + compiled frontend
+│   └── grafana-provisioning/  # Datasource + dashboard provisioning (tracked in git)
 ├── scripts/
 │   └── seed_test_db.py   # Seed script — populates education_db (16 tables) and finance_db (18 tables)
 ├── Excelsis.ipynb        # Interactive Jupyter notebook
 ├── start.sh              # Start both servers (backend :8000, frontend :5173)
 ├── requirements.lock     # Pinned Python dependencies (use this for installs)
 ├── .env.example          # Environment variable template
-└── .env.test             # Pre-filled config for the Docker test database
+└── .env.test             # Pre-filled config for a local test SQL Server
 ```
 
 ---
@@ -152,6 +158,8 @@ This starts:
 - **FastAPI** on `http://localhost:8000`
 - **React** on `http://localhost:5173`
 
+Redis, Prometheus, and Grafana are optional for local dev (the app falls back to in-memory rate limiting and works fine without metrics/dashboards) — see [Observability Stack](#observability-stack) to start them.
+
 Open **http://localhost:5173** in your browser. You'll be redirected to the login page.
 
 Default credentials: `admin` / the value of `ADMIN_PASSWORD` in your `.env` (defaults to `admin123` if not set).
@@ -193,48 +201,26 @@ Default credentials: `admin` / the value of `ADMIN_PASSWORD` in your `.env` (def
 
 ---
 
-## Docker Test Database
+## Local Test Database
 
-For local development and integration testing without a production SQL Server, a Docker-based SQL Server 2022 instance is provided with two pre-seeded databases.
+This project runs against a native SQL Server instance — no Docker is required or supported (some hosts, e.g. EC2 instances without nested-virtualization/hypervisor access, cannot run Docker Desktop at all). `scripts/seed_test_db.py` populates two databases (`education_db`, `finance_db`) against any reachable SQL Server, local or remote.
 
-```bash
-# Start the container (first run downloads ~1.5 GB image)
-docker compose -f docker/docker-compose.yml up -d
-
-# Install the seeding dependency (one-time)
-pip install faker
-
-# Seed both databases — choose a scale tier
-python scripts/seed_test_db.py --scale small   # ~100K rows, fast
-python scripts/seed_test_db.py --scale medium  # ~1M rows
-python scripts/seed_test_db.py --scale large   # ~5M rows across 34 tables, ~5–10 min
-
-# Use the pre-filled config
-cp .env.test .env
-```
-
-| Database | Tables | Purpose |
-|---|---|---|
-| `education_db` | 16 | Attendance, students, teachers, grades, subjects |
-| `finance_db` | 18 | Transactions, invoices, purchase orders, budgets, expenses |
-
----
-
-## Native Windows SQL Server
-
-If you have SQL Server installed locally (no Docker), you can seed the same test databases directly using Windows integrated authentication — no password needed.
-
-**Prerequisites:** ODBC Driver 18 for SQL Server must be installed and the SQL Server service must be running.
+**Prerequisites:** ODBC Driver 18 for SQL Server must be installed, and a SQL Server instance must be reachable (local install, LAN host, or cloud instance).
 
 ```bash
 # Install the seeding dependency
 pip install -e ".[dev]"
 
-# Create and seed both databases (Windows auth, local default instance)
+# Windows integrated auth, local default instance — no password needed
 python scripts/seed_test_db.py --scale medium --auth-method windows --server .
+
+# SQL auth, any host (local, LAN, or remote)
+python scripts/seed_test_db.py --scale medium --server myhost --username sa --password yourpassword
 ```
 
-Then update `.env`:
+Use `--server .\SQLEXPRESS` for SQL Server Express, or `--server myhost` / `--server myhost,1433` for a remote instance.
+
+Then update `.env` (or `cp .env.test .env` for a pre-filled starting point):
 
 ```env
 SQL_SERVER=.
@@ -243,13 +229,60 @@ SQL_DATABASES=education_db,finance_db
 SQL_PRIMARY_DB=education_db
 ```
 
-Use `--server .\SQLEXPRESS` if running SQL Server Express, or `--server myhost` for a remote instance. For SQL auth on any server, omit `--auth-method windows` and add `--username sa --password yourpassword` instead.
+| Database | Tables | Purpose |
+|---|---|---|
+| `education_db` | 16 | Attendance, students, teachers, grades, subjects |
+| `finance_db` | 18 | Transactions, invoices, purchase orders, budgets, expenses |
 
 | Scale | Students | Attendance rows | Approx. time |
 |---|---|---|---|
 | `small` | 1 000 | 100 000 | ~10 s |
 | `medium` | 5 000 | 500 000 | ~1–2 min |
 | `large` | 20 000 | 2 000 000 | ~5–10 min |
+
+---
+
+## Observability Stack
+
+Redis (rate-limit counters), Prometheus (metrics), and Grafana (dashboards) run as **native binaries**, not containers. This works identically on Windows and Linux hosts, including EC2 instances without hypervisor access for Docker Desktop.
+
+| Service | Binary | Default port | Notes |
+|---|---|---|---|
+| Redis-compatible cache | [Microsoft Garnet](https://github.com/microsoft/garnet) (`tools/garnet/`) | `6379` | Drop-in Redis-protocol server. Must be started with `--lua` — the rate limiter (`limits` library) requires `EVALSHA`/Lua scripting, which is off by default. |
+| Metrics | [Prometheus](https://prometheus.io) (`tools/prometheus/`) | `9090` | Scrapes the FastAPI `/metrics` endpoint on `localhost:8000`. |
+| Dashboards | [Grafana](https://grafana.com) (`tools/grafana/`) | `3001` | Datasources/dashboards provisioned from `tools/grafana-provisioning/` (tracked in git — no secrets, credentials are env-var substituted at launch). |
+
+None of `tools/garnet`, `tools/prometheus`, or `tools/grafana` are checked into git (they're large vendored binaries) — download them once per host:
+
+```bash
+# Garnet (Redis-compatible) — download the release matching your OS/arch from
+# https://github.com/microsoft/garnet/releases and extract to tools/garnet/
+
+# Prometheus — https://prometheus.io/download/, extract to tools/prometheus/
+
+# Grafana — https://grafana.com/grafana/download (OSS, matching OS), extract to tools/grafana/
+```
+
+Start each (adjust paths for your OS):
+
+```bash
+# Garnet
+tools/garnet/<target>/GarnetServer(.exe) --port 6379 --lua
+
+# Prometheus
+cd tools/prometheus && ./prometheus(.exe) --config.file=prometheus.yml
+
+# Grafana — set EXCELSIS_HOME to the repo root (used by dashboard provisioning path)
+# and the real SQL_SERVER/SQL_PRIMARY_DB/SQL_USERNAME/SQL_PASSWORD for the datasource
+cd tools/grafana
+EXCELSIS_HOME=/path/to/repo GF_PATHS_PROVISIONING=../grafana-provisioning \
+GF_SERVER_HTTP_PORT=3001 GF_SECURITY_ADMIN_PASSWORD=admin \
+./bin/grafana(.exe) server --homepath .
+```
+
+Then set `REDIS_URI=redis://localhost:6379` in `.env` so rate limiting is Redis-backed instead of falling back to in-memory (which doesn't share state across workers).
+
+Grafana UI: `http://localhost:3001` (default login `admin`/`admin` unless `GF_SECURITY_ADMIN_PASSWORD` is set). Two dashboards are provisioned automatically: **API Health** and **Business Metrics**.
 
 ---
 
@@ -332,5 +365,29 @@ CURRENT_USER = UserContext(user_id="ms_johnson")
 Data is read directly from SQL Server. Configure the connection in `.env` (see [Environment Variables](#environment-variables)).
 
 The agent can query any database listed in `SQL_DATABASES`. The agent will adapt its T-SQL to whatever schema it finds via `run_sql_query`.
+
+---
+
+## AWS Deployment
+
+The app runs as native OS processes — no containers required, which also means no ECS/EKS/Fargate dependency. This works on any EC2 instance, including ones without hypervisor access for Docker Desktop (nested-virtualization-restricted instance types).
+
+**Minimum setup on a fresh EC2 instance:**
+
+1. Install Python 3.11+, Node 18+, and the ODBC Driver 18 for SQL Server.
+2. Provision SQL Server — either on the same instance, a separate EC2 instance, or Amazon RDS for SQL Server (set `SQL_SERVER` to the RDS endpoint).
+3. Install Ollama, or configure `OLLAMA_BASE_URL`/`OLLAMA_API_KEY` to use Ollama's hosted cloud API instead of running a local model — cloud is the practical choice on smaller instance types that can't host a multi-GB model.
+4. Follow [Quick Start](#quick-start) steps 2–4 (env config, Python deps, frontend deps).
+5. Download the observability binaries once (see [Observability Stack](#observability-stack)).
+6. Register each long-running process (Uvicorn, Vite/build output served statically, Garnet, Prometheus, Grafana) with a process supervisor so they survive reboots and restart on crash:
+   - **Linux**: `systemd` unit files (one per service) or a process manager like `pm2`.
+   - **Windows**: `nssm` (Non-Sucking Service Manager) to wrap each `.exe`/script as a Windows Service, or Task Scheduler with "run at startup."
+7. For production, build the frontend once (`npm run build` in `web/`) and serve the static output from a proper web server or CDN in front of FastAPI, rather than running the Vite dev server.
+
+**Networking / security group notes:**
+- Only `:8000` (API) and the frontend's serving port need to be reachable from outside the instance.
+- `:6379` (Redis/Garnet), `:9090` (Prometheus), and `:3001` (Grafana) should stay restricted to localhost or a private subnet/VPN — none of them have auth enabled by default in this setup.
+- Store secrets (`JWT_SECRET`, `SQL_PASSWORD`, `OLLAMA_API_KEY`, `ADMIN_PASSWORD`) in AWS Secrets Manager or Parameter Store rather than a plain `.env` file on production hosts; load them into the process environment at startup instead of committing them to disk.
+- Rotate `JWT_SECRET` and `ADMIN_PASSWORD` away from their defaults before any production use — the app hard-fails startup if `JWT_SECRET` is still the placeholder value, but `ADMIN_PASSWORD` has no such guard.
 
 ---
