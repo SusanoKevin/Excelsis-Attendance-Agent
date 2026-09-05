@@ -69,7 +69,10 @@ A full-stack AI data analyst built on a LangGraph ReAct agent (local LLMs via Ol
 │   ├── rag_store.py      # ChromaDB collections for schema and policy vector search
 │   ├── rag_ingestor.py   # Ingests PDFs/Markdown from docs/ + auto-indexes SQL schema
 │   ├── agent.py          # ExcelsisAgent — LangGraph ReAct agent (qwen2.5:14b)
-│   └── mcp_server.py     # FastMCP server for Claude Code
+│   ├── mcp_server.py     # FastMCP server for Claude Code
+│   ├── eval/             # RAG retrieval-quality eval harness + LLM-judge groundedness check
+│   ├── observability/    # Per-run agent trace recorder (loop detection, step timing)
+│   └── routing/          # Cost/latency-aware model tier router
 │
 ├── docs/                 # Policy documents scanned by rag_ingestor.py (.pdf and .md)
 │
@@ -89,7 +92,9 @@ A full-stack AI data analyst built on a LangGraph ReAct agent (local LLMs via Ol
 │   ├── grafana/          # Grafana binary + compiled frontend
 │   └── grafana-provisioning/  # Datasource + dashboard provisioning (tracked in git)
 ├── scripts/
-│   └── seed_test_db.py   # Seed script — populates education_db (16 tables) and finance_db (18 tables)
+│   ├── seed_test_db.py                 # Seed script — populates education_db (16 tables) and finance_db (18 tables)
+│   ├── run_rag_eval.py                 # RAG retrieval-quality golden-set eval CLI
+│   └── estimate_routing_savings.py     # Illustrative cost projection for tiered model routing
 ├── Excelsis.ipynb        # Interactive Jupyter notebook
 ├── start.sh              # Start both servers (backend :8000, frontend :5173)
 ├── requirements.lock     # Pinned Python dependencies (use this for installs)
@@ -337,7 +342,45 @@ The FastAPI backend is available at `http://localhost:8000`. Interactive docs at
 | GET | `/data/stats` | Any | Stats by group/period |
 | GET | `/data/trends` | Any | Period comparison: last 30 days vs prior 30 days |
 | GET | `/data/sparklines` | Any | Sparkline trend data |
+| GET | `/observability/traces` | Admin | Recent agent run traces — per-tool timing, repeated-call/loop flags, error status |
 | GET | `/health` | None | Liveness check |
+
+---
+
+## Reliability & Evaluation Tooling
+
+Three additions on top of the existing Prometheus/Grafana stack, aimed at the parts of running an LLM agent in production that raw request metrics don't cover: is retrieval actually finding the right document, is a run looping instead of failing fast, and is every query paying for the same model tier regardless of how simple it is.
+
+### RAG retrieval-quality eval (`src/eval/`)
+
+A golden-set harness that measures retrieval quality — hit@k and mean reciprocal rank — against the policy vector store, independent of any LLM call, so it's fast and deterministic enough to run on every docs/schema change:
+
+```bash
+python scripts/run_rag_eval.py                        # runs src/eval/golden_sets/policy_golden_set.json
+python scripts/run_rag_eval.py --json report.json      # write the full report
+python scripts/run_rag_eval.py --fail-under 0.9        # non-zero exit if hit_rate drops below 90% — CI-friendly
+python scripts/run_rag_eval.py --llm-judge             # add an LLM groundedness pass (requires Ollama)
+```
+
+`src/eval/judge.py` layers an optional LLM-as-judge groundedness check on top, for catching the case where retrieval succeeded but the generated answer still drifted from the retrieved context — the actual hallucination-in-production failure mode, not just a retrieval miss.
+
+### Agent reliability trace (`src/observability/trace.py`)
+
+`TracingQueryTracker` (wired into `ExcelsisAgent` as a drop-in replacement for the plain `QueryTracker`) records every tool step of a run — not just aggregate counts — so a repeated-tool-call loop can be flagged well before LangGraph's hard recursion limit kicks in, and per-step latency can be inspected instead of only end-to-end duration. Two new Prometheus metrics (`agent_repeated_tool_calls_total`, `agent_step_duration_seconds{tool=}`) feed the existing Grafana dashboards, and the last 200 runs are queryable directly:
+
+```bash
+curl -H "Authorization: Bearer $ADMIN_JWT" http://localhost:8000/observability/traces?limit=10
+```
+
+### Cost/latency-aware model router (`src/routing/model_router.py`)
+
+A tiered router — cheap/fast local tier for direct lookups and greetings, a stronger tier for multi-step analytical questions — with a fast, explainable heuristic classifier (`classify_complexity`, no extra model call) and Prometheus tracking of tier selection, latency, and estimated cost. This targets the deployment shape the project already supports via `OLLAMA_BASE_URL`/`OLLAMA_API_KEY` (Ollama Cloud), where per-token cost becomes real — it's available as a tested, standalone component rather than force-wired into the current single-model setup:
+
+```bash
+python scripts/estimate_routing_savings.py   # illustrative cost projection over a sample query set
+```
+
+Run the new test suites with `pytest tests/test_rag_eval.py tests/test_trace.py tests/test_model_router.py` (no Ollama or SQL Server required).
 
 ---
 

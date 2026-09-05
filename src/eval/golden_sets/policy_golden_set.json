@@ -1,0 +1,30 @@
+[
+  {
+    "query": "What happens if a student is late three times in one month?",
+    "expected_substrings": ["Three Late records in one month", "one Absent"]
+  },
+  {
+    "query": "What is the default at-risk threshold percentage?",
+    "expected_substrings": ["AT_RISK_THRESHOLD", "75"]
+  },
+  {
+    "query": "How many minutes late before someone counts as absent instead of late?",
+    "expected_substrings": ["30 minutes late"]
+  },
+  {
+    "query": "What SQL statements is the agent allowed to run against the database?",
+    "expected_substrings": ["Only SELECT statements"]
+  },
+  {
+    "query": "How are weekly reports defined for reporting periods?",
+    "expected_substrings": ["Monday through Sunday"]
+  },
+  {
+    "query": "What status does a rate below 60 percent get flagged as?",
+    "expected_substrings": ["Critical", "< 60%"]
+  },
+  {
+    "query": "Can user-supplied values be interpolated directly into SQL queries?",
+    "expected_substrings": ["never string-interpolated"]
+  }
+]

@@ -11,12 +11,13 @@ import threading
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_ollama import ChatOllama
 from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.errors import GraphRecursionError
 from langgraph.prebuilt import create_react_agent
 
+from .observability.trace import TracingQueryTracker as QueryTracker
 from .prompt_guard import check_token_budget
 from .security import ADMIN_USER, UserContext
 from .tools import ALL_TOOLS
-from .tracker import QueryTracker
 
 logger = logging.getLogger(__name__)
 
@@ -26,13 +27,19 @@ _INVALID_HISTORY_MARKERS = (
     "tool_calls that do not have a corresponding",
 )
 
+_RECURSION_MESSAGE = (
+    "I couldn't find an answer to that with the connected data — it may be asking "
+    "about something outside the current schema. Try rephrasing or asking about a "
+    "different dimension."
+)
+
 
 def _is_invalid_history_error(exc: Exception) -> bool:
     msg = str(exc)
     return any(marker in msg for marker in _INVALID_HISTORY_MARKERS)
 
 
-SYSTEM_PROMPT = """You are an expert Data Analyst for Excelsis 360.
+SYSTEM_PROMPT = r"""You are an expert Data Analyst for Excelsis 360.
 
 Guidelines:
 - Be specific: name groups and entities when data is available
@@ -172,6 +179,8 @@ class ExcelsisAgent:
         def _run() -> None:
             try:
                 result_q.put(("ok", self._graph.invoke({"messages": messages}, config=config)))
+            except GraphRecursionError:
+                result_q.put(("recursion", None))
             except Exception as e:
                 if _is_invalid_history_error(e):
                     self._clear_thread(thread_id)
@@ -194,6 +203,10 @@ class ExcelsisAgent:
             return "Sorry, the request timed out. The model may be busy — please try again."
 
         status, value = result_q.get()
+        if status == "recursion":
+            tracker.record_error()
+            tracker.finish()
+            return _RECURSION_MESSAGE
         if status == "err":
             tracker.record_error()
             tracker.finish()
@@ -234,6 +247,7 @@ class ExcelsisAgent:
 
                             elif kind == "on_tool_end":
                                 name = event.get("name", "")
+                                tracker.record_tool_end(name)
                                 yield {"type": "tool_end", "tool": name}
                                 raw = event.get("data", {}).get("output")
                                 if name == "update_dashboard_view":
@@ -266,6 +280,11 @@ class ExcelsisAgent:
         except asyncio.TimeoutError:
             tracker.record_error()
             yield {"type": "error", "message": "Request timed out. The model may be busy — please try again."}
+            return
+
+        except GraphRecursionError:
+            tracker.record_error()
+            yield {"type": "error", "message": _RECURSION_MESSAGE}
             return
 
         finally:

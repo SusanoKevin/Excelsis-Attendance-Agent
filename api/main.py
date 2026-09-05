@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import threading
@@ -20,6 +21,7 @@ from api.limiter import limiter
 from api.routers.auth import router as auth_router
 from api.routers.chat import router as chat_router
 from api.routers.data import router as data_router
+from api.routers.observability import router as observability_router
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from src.agent import ExcelsisAgent
@@ -50,8 +52,17 @@ def _validate_startup(store: SQLDataStore) -> None:
         req = urllib.request.Request(f"{ollama_base_url}/api/tags")
         if ollama_api_key:
             req.add_header("Authorization", f"Bearer {ollama_api_key}")
-        urllib.request.urlopen(req, timeout=3)
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            body = json.loads(resp.read())
         ollama_ok = True
+        available = {m.get("name") or m.get("model") for m in body.get("models", [])}
+        if available and model not in available:
+            logger.error(
+                "MODEL='%s' is not available at %s (it may have been retired or "
+                "requires a different subscription tier) — chat requests will fail "
+                "until MODEL is updated to one of the available models.",
+                model, ollama_base_url,
+            )
     except Exception:
         logger.warning("Ollama not reachable at %s — agent responses will fail", ollama_base_url)
 
@@ -134,6 +145,7 @@ app.add_middleware(
 app.include_router(auth_router, prefix="/auth", tags=["auth"])
 app.include_router(chat_router, prefix="/chat", tags=["chat"])
 app.include_router(data_router, prefix="/data", tags=["data"])
+app.include_router(observability_router, prefix="/observability", tags=["observability"])
 
 
 @app.get("/health", tags=["health"])

@@ -32,6 +32,11 @@ class QueryTracker:
     def record_tool(self, tool_name: str) -> None:
         _prom_tool_invocations.labels(tool=tool_name).inc()
 
+    def record_tool_end(self, tool_name: str) -> None:
+        """No-op here; overridden by TracingQueryTracker to close out a step's
+        timing. Kept on the base class so callers can invoke it unconditionally
+        regardless of which tracker implementation is in use."""
+
     def record_error(self) -> None:
         _prom_query_errors.inc()
 
