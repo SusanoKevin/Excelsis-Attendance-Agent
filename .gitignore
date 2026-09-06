@@ -23,6 +23,11 @@ Github Personal Access Token.txt
 chat.db
 chat.db-shm
 chat.db-wal
+audit.db
+audit.db-shm
+audit.db-wal
+.venv-pg/
+.pgdata/
 *.log
 *.egg-info/
 tools/

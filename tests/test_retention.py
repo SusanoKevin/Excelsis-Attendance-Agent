@@ -5,7 +5,19 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import pytest
+
 from src.retention import purge_expired_threads, record_activity
+
+
+@pytest.fixture(autouse=True)
+def _no_checkpoint_db_uri(monkeypatch):
+    """Every test in this file exercises the SQLite branch explicitly via
+    CHAT_DB -- isolate from whatever CHECKPOINT_DB_URI happens to be set in
+    the local .env (e.g. a self-owned Postgres server from
+    scripts/local_postgres.py), which would otherwise silently redirect
+    these functions to the Postgres branch instead."""
+    monkeypatch.delenv("CHECKPOINT_DB_URI", raising=False)
 
 
 def _last_seen(db_path: str, thread_id: str) -> float | None:

@@ -426,6 +426,24 @@ Since the underlying data is often student records, the SQL execution path is de
 
 These were ported and adapted from the equivalent safeguards in a sibling project, then fitted to this app's SQLAlchemy + pyodbc + SQL Server stack (no ORM layer, so the audit trail and retention tracker use dedicated SQLite tables rather than ORM models).
 
+### Self-owned local Postgres (`scripts/local_postgres.py`)
+
+The SQL Server connection-hardening story above has one gap in practice: **we don't administer that server.** It belongs to the school's SIS, and the app's own SQL login has neither `sysadmin` nor `db_owner` — so `scripts/create_readonly_sql_login.sql` can be written and handed off, but not run by this project's own credentials.
+
+`CHECKPOINT_DB_URI` doesn't have that constraint — conversation-checkpoint storage is infrastructure this project can own outright. `scripts/local_postgres.py` manages a self-contained, embedded PostgreSQL server (via the [`pgserver`](https://pypi.org/project/pgserver/) package) that requires no system install, Docker, or admin rights on the host — appropriate for an EC2 instance without hypervisor access, same constraint as the rest of this project's [Observability Stack](#observability-stack). On first `start` it creates a dedicated `excelsis_app` role and `excelsis_checkpoints` database, scoped so that role can reach *only* that one database (Postgres grants `CONNECT` on every database to `PUBLIC` by default — this is explicitly revoked for `postgres`/`template1`), authenticated with a real `scram-sha-256` password rather than trust. This database holds only the app's own LangGraph checkpoints — never a copy of the school's SIS data.
+
+`pgserver` has no wheels for the project's main Python version, so it runs from its own dedicated venv:
+
+```bash
+python -m venv .venv-pg
+.venv-pg/Scripts/python.exe -m pip install pgserver psycopg2-binary   # Windows
+.venv-pg/Scripts/python.exe scripts/local_postgres.py start           # idempotent; safe to re-run
+.venv-pg/Scripts/python.exe scripts/local_postgres.py status
+.venv-pg/Scripts/python.exe scripts/local_postgres.py stop
+```
+
+`start` prints the `excelsis_app` password once (rotated on every call) and writes the resulting `CHECKPOINT_DB_URI` into `.env` automatically — including after a restart, since the underlying server picks a fresh TCP port on Windows each time it cold-starts. The data directory (`.pgdata/`) and this venv (`.venv-pg/`) are both gitignored; nothing here is meant to be shared across machines.
+
 ---
 
 ## Jupyter Notebook
