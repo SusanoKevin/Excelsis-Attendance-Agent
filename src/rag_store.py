@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 
+import chromadb
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 
@@ -23,15 +24,34 @@ class ExcelsisRAGStore:
         self._schema_k = schema_k
         self._policy_k = policy_k
         embeddings = HuggingFaceEmbeddings(model_name=embed_model)
+
+        # A local persistent directory (the default) ties the vector store to
+        # one disk and one process — fine for a single instance, but it means
+        # every app replica behind a load balancer would build its own
+        # separate index. Setting CHROMA_SERVER_HOST points every replica at
+        # one shared `chroma run` server instead; unset, behavior is
+        # unchanged from the original local-directory mode.
+        server_host = os.environ.get("CHROMA_SERVER_HOST", "")
+        chroma_kwargs: dict = {}
+        if server_host:
+            client = chromadb.HttpClient(
+                host=server_host,
+                port=int(os.environ.get("CHROMA_SERVER_PORT", "8000")),
+                ssl=os.environ.get("CHROMA_SERVER_SSL", "false").lower() == "true",
+            )
+            chroma_kwargs["client"] = client
+        else:
+            chroma_kwargs["persist_directory"] = chroma_path
+
         self._schema_vs = Chroma(
             collection_name=self.SCHEMA_COLLECTION,
             embedding_function=embeddings,
-            persist_directory=chroma_path,
+            **chroma_kwargs,
         )
         self._policy_vs = Chroma(
             collection_name=self.POLICY_COLLECTION,
             embedding_function=embeddings,
-            persist_directory=chroma_path,
+            **chroma_kwargs,
         )
         rag_ttl = int(os.environ.get("RAG_CACHE_TTL", "3600"))
         self._cache = _TTLCache(ttl=rag_ttl, maxsize=256, name="rag")

@@ -19,7 +19,7 @@ A full-stack AI data analyst built on a LangGraph ReAct agent (local LLMs via Ol
 - **Web UI** — React 18 + Tailwind interface with live streaming chat, KPI cards, threshold alerts table, sparkline trends, and user management
 - **REST API** — FastAPI backend with JWT auth, SSE streaming, and rate limiting
 - **Rate limiting** — chat endpoint capped at 10 requests/minute per user/IP (slowapi); Redis-backed (`REDIS_URI`) for accurate limits across multiple workers, falls back to in-memory for single-worker deployments
-- **Persistent conversation history** — per-user chat history stored in a SQLite file (`CHAT_DB`) via LangGraph's `SqliteSaver` checkpointer; survives restarts and is shared across Uvicorn workers
+- **Persistent conversation history** — per-user chat history stored in a SQLite file (`CHAT_DB`) via LangGraph's `SqliteSaver` checkpointer; survives restarts and is shared across Uvicorn workers; optionally Postgres-backed (`CHECKPOINT_DB_URI`) to share history across multiple app replicas — see [Scaling to Multiple Replicas](#scaling-to-multiple-replicas)
 - **Jupyter notebook** — full interactive analysis environment that shares the same `src/` backend
 - **MCP server** — exposes Excelsis360 data tools to Claude Code via FastMCP
 - **Observability** — Prometheus metrics (`agent_tool_invocations_total`, `agent_query_duration_seconds`, `agent_query_errors_total`, `cache_hits_total`, `cache_misses_total`) via `src/tracker.py`; Grafana dashboards provisioned from `tools/grafana-provisioning/`; `/metrics` scrape endpoint always active — see [Observability Stack](#observability-stack)
@@ -198,11 +198,15 @@ Default credentials: `admin` / the value of `ADMIN_PASSWORD` in your `.env` (def
 | `CHROMA_PATH` | No | `.chroma` | Persistent ChromaDB directory path |
 | `EMBED_MODEL` | No | `BAAI/bge-small-en-v1.5` | HuggingFace embedding model for RAG (auto-downloaded) |
 | `CHAT_DB` | No | `./chat.db` | SQLite file for persistent per-user conversation history |
-| `REDIS_URI` | No | `` | Redis connection URI for shared rate-limit counters across workers (e.g. `redis://localhost:6379`) |
+| `REDIS_URI` | No | `` | Redis connection URI for shared rate-limit counters across workers and shared agent-trace history (e.g. `redis://localhost:6379`) |
 | `DOCS_PATH` | No | `docs` | Directory scanned for policy documents |
 | `MAX_MESSAGE_LEN` | No | `2000` | Maximum characters allowed in a single chat message |
 | `MAX_PROMPT_TOKENS` | No | `2048` | Maximum estimated tokens (message + history) before rejection |
 | `RAG_CACHE_TTL` | No | `3600` | TTL in seconds for RAG query result cache |
+| `CHECKPOINT_DB_URI` | No | `` | Postgres connection string for shared conversation-history storage across replicas (e.g. `postgresql://user:pass@host/db`); unset uses the local `CHAT_DB` SQLite file |
+| `CHROMA_SERVER_HOST` | No | `` | Hostname of a shared `chroma run` server; unset uses the local `CHROMA_PATH` persistent directory |
+| `CHROMA_SERVER_PORT` | No | `8000` | Port for `CHROMA_SERVER_HOST` |
+| `CHROMA_SERVER_SSL` | No | `false` | Set `true` if the Chroma server requires SSL |
 
 ---
 
@@ -381,6 +385,21 @@ python scripts/estimate_routing_savings.py   # illustrative cost projection over
 ```
 
 Run the new test suites with `pytest tests/test_rag_eval.py tests/test_trace.py tests/test_model_router.py` (no Ollama or SQL Server required).
+
+---
+
+## Scaling to Multiple Replicas
+
+The default configuration (SQLite checkpointer, local ChromaDB directory, in-memory trace buffer, single Ollama instance) is correct for one instance and needs no configuration. Every option below is opt-in via an env var — leaving it unset preserves that exact single-instance behavior. Set them once several app replicas need to share state behind a load balancer:
+
+| Bottleneck | Env var(s) | What changes |
+|---|---|---|
+| Conversation history tied to one instance's local `chat.db` | `CHECKPOINT_DB_URI` | Swaps the LangGraph checkpointer from `SqliteSaver`/`AsyncSqliteSaver` to `PostgresSaver`/`AsyncPostgresSaver` (`src/agent.py`, `api/main.py`), so any replica can resume any user's thread |
+| RAG vector index built separately per replica | `CHROMA_SERVER_HOST`, `CHROMA_SERVER_PORT`, `CHROMA_SERVER_SSL` | Points `ExcelsisRAGStore` (`src/rag_store.py`) at one shared `chroma run` server via `chromadb.HttpClient` instead of each replica's own `.chroma` directory |
+| Agent traces only visible from the replica that served the request | `REDIS_URI` | `TraceRecorder` (`src/observability/trace.py`) pushes traces to a capped Redis list in addition to its in-memory ring buffer, so `/observability/traces` sees runs from every replica |
+| One Ollama process is a hard concurrency ceiling | none (code-level) | `ReplicaPool` (`src/routing/model_router.py`) round-robins a `ModelTier` across several `ReplicaHandle`s — construct one per Ollama endpoint and pass the pool as a tier's `replicas=` instead of `build=` |
+
+Every path degrades gracefully: a Redis outage falls back to the in-memory trace buffer without raising, and Postgres/Chroma-server misconfiguration fails fast at startup rather than silently falling back (so a bad `CHECKPOINT_DB_URI` or `CHROMA_SERVER_HOST` is caught immediately instead of masking data loss).
 
 ---
 

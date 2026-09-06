@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 import time
 from collections import Counter as _Counter, deque
 from dataclasses import dataclass, field
@@ -8,6 +10,11 @@ from threading import Lock
 from prometheus_client import Counter, Histogram
 
 from ..tracker import QueryTracker
+
+try:
+    import redis as _redis_lib
+except ImportError:  # pragma: no cover - redis is a declared dependency, but degrade gracefully
+    _redis_lib = None
 
 _prom_repeated_calls: Counter = Counter(
     "agent_repeated_tool_calls_total",
@@ -90,18 +97,66 @@ class AgentRunTrace:
         }
 
 
-class TraceRecorder:
-    """Thread-safe ring buffer of the most recent agent run traces."""
+class _ReplayedTrace:
+    """Thin read-only wrapper around a trace dict read back from Redis, so
+    `recent()` callers can keep calling `.to_dict()` uniformly regardless of
+    which backend actually served the trace list."""
 
-    def __init__(self, maxlen: int = 200) -> None:
+    def __init__(self, data: dict) -> None:
+        self._data = data
+
+    def to_dict(self) -> dict:
+        return self._data
+
+
+class TraceRecorder:
+    """Thread-safe ring buffer of the most recent agent run traces.
+
+    When a Redis URI is configured (`redis_uri`, or the same `REDIS_URI` env
+    var the rate limiter already uses if not passed explicitly), traces are
+    also pushed to a capped Redis list so multiple app replicas share one
+    trace view instead of each only ever seeing its own in-process traces —
+    `recent()` reads from Redis in that case. A Redis outage (or it never
+    being configured) degrades to the in-memory-only ring buffer; it never
+    breaks request handling, since every Redis call here is best-effort.
+    """
+
+    _REDIS_KEY = "excelsis:agent_traces"
+
+    def __init__(self, maxlen: int = 200, redis_uri: str | None = None, redis_client=None) -> None:
         self._traces: deque[AgentRunTrace] = deque(maxlen=maxlen)
         self._lock = Lock()
+        self._maxlen = maxlen
+        self._redis = redis_client
+        if self._redis is None:
+            uri = redis_uri if redis_uri is not None else os.environ.get("REDIS_URI", "")
+            if uri and _redis_lib is not None:
+                try:
+                    client = _redis_lib.Redis.from_url(uri, socket_connect_timeout=2, socket_timeout=2)
+                    client.ping()
+                    self._redis = client
+                except Exception:
+                    self._redis = None  # degrade to in-memory only
 
     def add(self, trace: AgentRunTrace) -> None:
         with self._lock:
             self._traces.append(trace)
+        if self._redis is not None:
+            try:
+                pipe = self._redis.pipeline()
+                pipe.lpush(self._REDIS_KEY, json.dumps(trace.to_dict()))
+                pipe.ltrim(self._REDIS_KEY, 0, self._maxlen - 1)
+                pipe.execute()
+            except Exception:
+                pass  # best-effort — never let trace sharing break a request
 
-    def recent(self, limit: int = 50) -> list[AgentRunTrace]:
+    def recent(self, limit: int = 50) -> list:
+        if self._redis is not None:
+            try:
+                raw = self._redis.lrange(self._REDIS_KEY, 0, limit - 1)
+                return [_ReplayedTrace(json.loads(item)) for item in raw]
+            except Exception:
+                pass  # fall through to the in-memory view below
         with self._lock:
             items = list(self._traces)[-limit:]
         return list(reversed(items))
@@ -109,6 +164,11 @@ class TraceRecorder:
     def clear(self) -> None:
         with self._lock:
             self._traces.clear()
+        if self._redis is not None:
+            try:
+                self._redis.delete(self._REDIS_KEY)
+            except Exception:
+                pass
 
 
 _recorder = TraceRecorder()

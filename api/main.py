@@ -24,6 +24,11 @@ from api.routers.data import router as data_router
 from api.routers.observability import router as observability_router
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
+try:
+    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+except ImportError:  # pragma: no cover - postgres checkpointing is optional
+    AsyncPostgresSaver = None
+
 from src.agent import ExcelsisAgent
 from src.rag_ingestor import run_ingestion
 from src.rag_store import ExcelsisRAGStore
@@ -31,6 +36,21 @@ from src.sql_store import SQLDataStore
 
 
 logger = logging.getLogger(__name__)
+
+
+def _checkpointer_cm():
+    """Returns the async checkpointer context manager for the API server's
+    lifespan. Mirrors src.agent._build_checkpointer's SQLite-by-default,
+    Postgres-when-CHECKPOINT_DB_URI-is-set behavior for the async path."""
+    db_uri = os.environ.get("CHECKPOINT_DB_URI", "")
+    if db_uri:
+        if AsyncPostgresSaver is None:
+            raise RuntimeError(
+                "CHECKPOINT_DB_URI is set but langgraph-checkpoint-postgres is not "
+                "installed. Run: pip install langgraph-checkpoint-postgres"
+            )
+        return AsyncPostgresSaver.from_conn_string(db_uri)
+    return AsyncSqliteSaver.from_conn_string(os.getenv("CHAT_DB", "./chat.db"))
 
 
 def _validate_startup(store: SQLDataStore) -> None:
@@ -87,7 +107,9 @@ async def lifespan(app: FastAPI):
     app.state.store     = store
     app.state.rag_store = rag_store
 
-    async with AsyncSqliteSaver.from_conn_string(os.getenv("CHAT_DB", "./chat.db")) as checkpointer:
+    async with _checkpointer_cm() as checkpointer:
+        if os.environ.get("CHECKPOINT_DB_URI", ""):
+            await checkpointer.setup()
         app.state.agent = ExcelsisAgent(store=store, rag_store=rag_store, checkpointer=checkpointer)
 
 

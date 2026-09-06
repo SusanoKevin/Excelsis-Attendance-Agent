@@ -19,7 +19,40 @@ from .prompt_guard import check_token_budget
 from .security import ADMIN_USER, UserContext
 from .tools import ALL_TOOLS
 
+try:
+    import psycopg
+    from psycopg.rows import dict_row
+    from langgraph.checkpoint.postgres import PostgresSaver
+except ImportError:  # pragma: no cover - postgres checkpointing is optional
+    psycopg = None
+    dict_row = None
+    PostgresSaver = None
+
 logger = logging.getLogger(__name__)
+
+_CHECKPOINT_TABLES = ("checkpoint_writes", "checkpoint_blobs", "checkpoints")
+
+
+def _build_checkpointer(checkpoint_db_uri: str):
+    """Local SQLite (the default) ties conversation history to one disk and
+    one process — fine for a single instance, but every replica behind a
+    load balancer would keep its own isolated chat history. Setting
+    CHECKPOINT_DB_URI to a Postgres connection string points every replica
+    at one shared database instead; unset, behavior is unchanged from the
+    original SQLite-backed mode.
+    """
+    if checkpoint_db_uri:
+        if PostgresSaver is None:
+            raise RuntimeError(
+                "CHECKPOINT_DB_URI is set but langgraph-checkpoint-postgres is not "
+                "installed. Run: pip install langgraph-checkpoint-postgres"
+            )
+        conn = psycopg.connect(checkpoint_db_uri, autocommit=True, prepare_threshold=0, row_factory=dict_row)
+        checkpointer = PostgresSaver(conn)
+        checkpointer.setup()
+        return checkpointer
+    _conn = sqlite3.connect(os.getenv("CHAT_DB", "./chat.db"), check_same_thread=False)
+    return SqliteSaver(_conn)
 
 _INVALID_HISTORY_MARKERS = (
     "ToolMessage",
@@ -130,9 +163,9 @@ _llm = ChatOllama(
 
 class ExcelsisAgent:
     def __init__(self, store=None, rag_store=None, checkpointer=None) -> None:
+        self._checkpoint_db_uri = os.environ.get("CHECKPOINT_DB_URI", "")
         if checkpointer is None:
-            _conn = sqlite3.connect(os.getenv("CHAT_DB", "./chat.db"), check_same_thread=False)
-            checkpointer = SqliteSaver(_conn)
+            checkpointer = _build_checkpointer(self._checkpoint_db_uri)
         self._graph = create_react_agent(
             model=_llm,
             tools=ALL_TOOLS,
@@ -144,16 +177,30 @@ class ExcelsisAgent:
 
     def _clear_thread(self, thread_id: str) -> None:
         """Delete all checkpoint rows for a thread to recover from corrupted state."""
+        if self._checkpoint_db_uri:
+            self._clear_thread_postgres(thread_id)
+        else:
+            self._clear_thread_sqlite(thread_id)
+        logger.warning("Cleared corrupted checkpoint history for thread_id=%s", thread_id)
+
+    def _clear_thread_sqlite(self, thread_id: str) -> None:
         db_path = os.getenv("CHAT_DB", "./chat.db")
-        tables = ("checkpoint_writes", "checkpoint_blobs", "checkpoints")
         with sqlite3.connect(db_path, timeout=10) as conn:
-            for table in tables:
+            for table in _CHECKPOINT_TABLES:
                 try:
                     conn.execute(f"DELETE FROM {table} WHERE thread_id = ?", (thread_id,))
                 except sqlite3.OperationalError:
                     pass
             conn.commit()
-        logger.warning("Cleared corrupted checkpoint history for thread_id=%s", thread_id)
+
+    def _clear_thread_postgres(self, thread_id: str) -> None:
+        with psycopg.connect(self._checkpoint_db_uri, autocommit=True) as conn:
+            with conn.cursor() as cur:
+                for table in _CHECKPOINT_TABLES:
+                    try:
+                        cur.execute(f"DELETE FROM {table} WHERE thread_id = %s", (thread_id,))
+                    except Exception:
+                        pass
 
     def _build_config(self, user: UserContext) -> dict:
         return {

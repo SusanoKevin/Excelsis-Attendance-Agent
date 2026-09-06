@@ -3,7 +3,9 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from src.routing.model_router import ModelRouter, ModelTier, classify_complexity
+import pytest
+
+from src.routing.model_router import ModelRouter, ModelTier, ReplicaHandle, ReplicaPool, classify_complexity
 
 
 class TestClassifyComplexity:
@@ -41,6 +43,59 @@ class TestModelTier:
         instance2 = tier.get()
         assert calls == [1]  # only built once
         assert instance1 is instance2
+
+
+class TestReplicaPool:
+    def test_round_robins_across_replicas(self):
+        pool = ReplicaPool([
+            ReplicaHandle(name="ollama-1", build=lambda: "instance-1"),
+            ReplicaHandle(name="ollama-2", build=lambda: "instance-2"),
+        ])
+        selected = [pool.acquire().name for _ in range(4)]
+        assert selected == ["ollama-1", "ollama-2", "ollama-1", "ollama-2"]
+
+    def test_empty_pool_raises(self):
+        with pytest.raises(ValueError, match="at least one replica"):
+            ReplicaPool([])
+
+    def test_len_reports_replica_count(self):
+        pool = ReplicaPool([ReplicaHandle(name="a", build=lambda: "x"), ReplicaHandle(name="b", build=lambda: "y")])
+        assert len(pool) == 2
+
+
+class TestModelTierWithReplicaPool:
+    def test_tier_backed_by_pool_round_robins(self):
+        pool = ReplicaPool([
+            ReplicaHandle(name="ollama-1", build=lambda: "instance-1"),
+            ReplicaHandle(name="ollama-2", build=lambda: "instance-2"),
+        ])
+        tier = ModelTier(name="local", cost_per_1k_tokens=0.0, replicas=pool)
+        assert tier.replica_count == 2
+        assert [tier.get() for _ in range(3)] == ["instance-1", "instance-2", "instance-1"]
+
+    def test_single_build_tier_reports_replica_count_one(self):
+        tier = ModelTier(name="local", cost_per_1k_tokens=0.0, build=lambda: "instance-1")
+        assert tier.replica_count == 1
+
+    def test_requires_exactly_one_of_build_or_replicas(self):
+        pool = ReplicaPool([ReplicaHandle(name="a", build=lambda: "x")])
+        with pytest.raises(ValueError, match="exactly one"):
+            ModelTier(name="local", cost_per_1k_tokens=0.0, build=lambda: "x", replicas=pool)
+        with pytest.raises(ValueError, match="exactly one"):
+            ModelTier(name="local", cost_per_1k_tokens=0.0)
+
+    def test_router_select_works_with_pooled_tier(self):
+        pool = ReplicaPool([
+            ReplicaHandle(name="ollama-1", build=lambda: "instance-1"),
+            ReplicaHandle(name="ollama-2", build=lambda: "instance-2"),
+        ])
+        tier = ModelTier(name="local", cost_per_1k_tokens=0.0, replicas=pool)
+        router = ModelRouter(simple_tier=tier)
+
+        model1, name1 = router.select("Hello")
+        model2, name2 = router.select("Hi there")
+        assert name1 == name2 == "local"
+        assert {model1, model2} == {"instance-1", "instance-2"}
 
 
 class TestModelRouter:
