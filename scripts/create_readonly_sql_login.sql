@@ -63,5 +63,19 @@ GO
 DENY INSERT, UPDATE, DELETE, EXECUTE, ALTER, CONTROL TO [excelsis_readonly];
 GO
 
-PRINT 'excelsis_readonly login created/verified with db_datareader-only access to SISDemo.';
+-- The statements above can fail individually (e.g. insufficient privilege)
+-- without aborting the script, so verify the end state directly rather than
+-- printing an unconditional success message.
+IF EXISTS (SELECT 1 FROM sys.server_principals WHERE name = 'excelsis_readonly')
+   AND EXISTS (SELECT 1 FROM sys.database_principals WHERE name = 'excelsis_readonly')
+   AND IS_ROLEMEMBER('db_datareader', 'excelsis_readonly') = 1
+BEGIN
+    PRINT 'OK: excelsis_readonly login created/verified with db_datareader-only access to SISDemo.';
+END
+ELSE
+BEGIN
+    PRINT 'FAILED: excelsis_readonly was not fully created. Check the error messages above - '
+        + 'the connecting account needs sysadmin or securityadmin + db_owner rights, which the '
+        + 'app''s own runtime login should NOT have.';
+END
 GO
