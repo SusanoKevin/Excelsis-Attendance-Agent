@@ -32,6 +32,7 @@ except ImportError:  # pragma: no cover - postgres checkpointing is optional
 from src.agent import ExcelsisAgent
 from src.rag_ingestor import run_ingestion
 from src.rag_store import ExcelsisRAGStore
+from src.retention import purge_expired_threads
 from src.sql_store import SQLDataStore
 
 
@@ -53,6 +54,30 @@ def _checkpointer_cm():
     return AsyncSqliteSaver.from_conn_string(os.getenv("CHAT_DB", "./chat.db"))
 
 
+def _validate_production_config(jwt_secret: str) -> None:
+    """Fail fast on insecure configuration that must never reach production.
+
+    Only enforced when APP_ENV=production is explicitly set, so existing
+    dev/test setups (the default) are completely unaffected — this mirrors
+    the "opt-in, no change to default behavior" pattern used throughout this
+    app's env-var-gated features.
+    """
+    problems: list[str] = []
+
+    if len(jwt_secret) < 32:
+        problems.append("JWT_SECRET must be at least 32 characters in production.")
+
+    if os.environ.get("ADMIN_PASSWORD", "admin123") == "admin123":
+        problems.append("ADMIN_PASSWORD must not be the default 'admin123' in production.")
+
+    allowed_origins = os.environ.get("ALLOWED_ORIGINS", "")
+    if any(o.strip() == "*" for o in allowed_origins.split(",")):
+        problems.append("ALLOWED_ORIGINS must not be '*' in production.")
+
+    if problems:
+        raise RuntimeError("Invalid production configuration:\n  - " + "\n  - ".join(problems))
+
+
 def _validate_startup(store: SQLDataStore) -> None:
     model  = os.environ.get("MODEL", "qwen2.5:14b")
     server = os.environ.get("SQL_SERVER", "<not set>")
@@ -64,6 +89,9 @@ def _validate_startup(store: SQLDataStore) -> None:
             "SECURITY: JWT_SECRET is the insecure default. "
             "Set JWT_SECRET to a strong random value in your .env before starting."
         )
+
+    if os.environ.get("APP_ENV", "development").lower() == "production":
+        _validate_production_config(jwt_secret)
 
     ollama_base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
     ollama_api_key = os.environ.get("OLLAMA_API_KEY", "")
@@ -127,8 +155,22 @@ async def lifespan(app: FastAPI):
             name="rag-ingestor",
         ).start()
 
+        retention_days = int(os.environ.get("RETENTION_DAYS", "0"))
+        retention_stop = threading.Event()
+        if retention_days > 0:
+            interval_hours = int(os.environ.get("RETENTION_PURGE_INTERVAL_HOURS", "24"))
+
+            def _purge_loop():
+                while True:
+                    purge_expired_threads(retention_days, clear_thread=app.state.agent._clear_thread)
+                    if retention_stop.wait(interval_hours * 3600):
+                        break
+
+            threading.Thread(target=_purge_loop, daemon=True, name="retention-purge").start()
+
         await asyncio.to_thread(_validate_startup, store)
         yield
+        retention_stop.set()
 
     store.close()
 

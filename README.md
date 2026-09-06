@@ -207,6 +207,13 @@ Default credentials: `admin` / the value of `ADMIN_PASSWORD` in your `.env` (def
 | `CHROMA_SERVER_HOST` | No | `` | Hostname of a shared `chroma run` server; unset uses the local `CHROMA_PATH` persistent directory |
 | `CHROMA_SERVER_PORT` | No | `8000` | Port for `CHROMA_SERVER_HOST` |
 | `CHROMA_SERVER_SSL` | No | `false` | Set `true` if the Chroma server requires SSL |
+| `SQL_LOCK_TIMEOUT_MS` | No | `5000` | `SET LOCK_TIMEOUT` applied to every new SQL Server connection, so a misconfigured or overly-privileged login can't hang the pool waiting on a lock |
+| `SQL_IDENTIFIER_GUARD` | No | `true` | Set `false` to disable validating `run_sql_query`'s table/column references against the live schema catalog before execution |
+| `SQL_IDENTIFIER_CATALOG_TTL` | No | `3600` | TTL in seconds for the cached schema catalog used by the identifier guard |
+| `AUDIT_DB` | No | `./audit.db` | SQLite file for the admin action audit trail (user create/delete) |
+| `APP_ENV` | No | `development` | Set to `production` to enforce stricter startup checks: `JWT_SECRET` length, non-default `ADMIN_PASSWORD`, no wildcard `ALLOWED_ORIGINS` |
+| `RETENTION_DAYS` | No | `0` (disabled) | Purge conversation history for threads inactive longer than this many days |
+| `RETENTION_PURGE_INTERVAL_HOURS` | No | `24` | How often the retention purge job runs when `RETENTION_DAYS` is set |
 
 ---
 
@@ -347,6 +354,7 @@ The FastAPI backend is available at `http://localhost:8000`. Interactive docs at
 | GET | `/data/trends` | Any | Period comparison: last 30 days vs prior 30 days |
 | GET | `/data/sparklines` | Any | Sparkline trend data |
 | GET | `/observability/traces` | Admin | Recent agent run traces — per-tool timing, repeated-call/loop flags, error status |
+| GET | `/observability/admin-audit` | Admin | Recent admin actions — who created/deleted which account, when, and from where |
 | GET | `/health` | None | Liveness check |
 
 ---
@@ -400,6 +408,23 @@ The default configuration (SQLite checkpointer, local ChromaDB directory, in-mem
 | One Ollama process is a hard concurrency ceiling | none (code-level) | `ReplicaPool` (`src/routing/model_router.py`) round-robins a `ModelTier` across several `ReplicaHandle`s — construct one per Ollama endpoint and pass the pool as a tier's `replicas=` instead of `build=` |
 
 Every path degrades gracefully: a Redis outage falls back to the in-memory trace buffer without raising, and Postgres/Chroma-server misconfiguration fails fast at startup rather than silently falling back (so a bad `CHECKPOINT_DB_URI` or `CHROMA_SERVER_HOST` is caught immediately instead of masking data loss).
+
+---
+
+## Security Hardening
+
+Since the underlying data is often student records, the SQL execution path is defended in depth — each layer assumes the one before it could fail:
+
+| Layer | What it catches |
+|---|---|
+| **SQL guard** (`_assert_select_only`, `src/sql_store.py`) | Rejects any non-SELECT statement via a full AST walk (not just the top-level statement), `SELECT ... INTO` (which creates a table), and a regex blocklist for dangerous T-SQL constructs (`xp_cmdshell`, `OPENROWSET`, `OPENQUERY`, `WAITFOR DELAY`, `BULK INSERT`, etc.) that could otherwise hide inside an on-its-face-valid SELECT |
+| **Identifier guard** (`src/identifier_guard.py`) | Validates every table and column an LLM-generated query references against the real schema catalog before execution — rejects hallucinated identifiers (e.g. `students.gpa_unweighted`) instead of letting them hit SQL Server or silently match a similarly named column. Enabled by default (`SQL_IDENTIFIER_GUARD=false` to disable); fails open (skips validation) if schema introspection is unavailable, never blocking a request on its own failure |
+| **Connection hardening** | Every SQL Server connection sets `LOCK_TIMEOUT` (`SQL_LOCK_TIMEOUT_MS`) so a misconfigured or overly-privileged login can't hang the pool. SQL Server has no session-level read-only mode — that guarantee must come from the DB login itself: **grant the app's SQL login `db_datareader` only, never `db_owner` or `sysadmin`** |
+| **Admin audit trail** (`src/observability/audit.py`) | Every user create/delete records actor, action, target, client IP, and timestamp to a dedicated SQLite log (`AUDIT_DB`), readable via `GET /observability/admin-audit` — a FERPA-style "who touched the account plane" record |
+| **Startup validation** (`APP_ENV=production`) | Fails boot rather than silently running insecurely: `JWT_SECRET` under 32 characters, `ADMIN_PASSWORD` still the default, or `ALLOWED_ORIGINS` set to `*` |
+| **Retention purge** (`src/retention.py`, `RETENTION_DAYS`) | Disabled by default; when set, deletes checkpoint history for conversation threads inactive past the window — data-minimization for chat history that holds a copy of query results |
+
+These were ported and adapted from the equivalent safeguards in a sibling project, then fitted to this app's SQLAlchemy + pyodbc + SQL Server stack (no ORM layer, so the audit trail and retention tracker use dedicated SQLite tables rather than ORM models).
 
 ---
 

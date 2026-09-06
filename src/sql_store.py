@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
 import threading
 import time
 from urllib.parse import quote_plus
@@ -10,10 +11,12 @@ import numpy as np
 import pandas as pd
 import sqlglot
 from prometheus_client import Counter
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.pool import QueuePool
 from sqlglot import exp
+
+from .identifier_guard import SchemaCatalog, validate_identifiers
 
 _cache_hits: Counter = Counter(
     "cache_hits_total",
@@ -33,8 +36,27 @@ _FORBIDDEN = (
 
 _BLOCKED_SCHEMAS = frozenset({"information_schema", "sys", "sysobjects"})
 
+_BLOCKED_COLUMNS = frozenset({"password", "hashed_password", "ssn"})
+
+# T-SQL constructs that are dangerous even inside a syntactically valid SELECT
+# (extended stored procedures, linked-server/file access, timing attacks).
+# sqlglot may parse these as ordinary function calls rather than a distinct
+# node type, so a regex over the raw text is defence-in-depth alongside the
+# AST walk below, not a replacement for it.
+_BLOCKLIST = re.compile(
+    r"\b("
+    r"xp_cmdshell|xp_dirtree|xp_fileexist|xp_regread|xp_regwrite|"
+    r"sp_oacreate|sp_oamethod|sp_execute|sp_executesql|"
+    r"openrowset|opendatasource|openquery|openxml|"
+    r"bulk\s+insert|waitfor\s+delay|waitfor\s+time"
+    r")\b",
+    re.IGNORECASE,
+)
+
 
 def _assert_select_only(sql: str) -> None:
+    if _BLOCKLIST.search(sql):
+        raise PermissionError("Read-only store: statement contains a blocked function or construct.")
     try:
         trees = [t for t in sqlglot.parse(sql.replace("?", "NULL"), dialect="tsql") if t is not None]
     except Exception as e:
@@ -48,6 +70,8 @@ def _assert_select_only(sql: str) -> None:
     for node in trees[0].walk():
         if isinstance(node, _FORBIDDEN):
             raise PermissionError(f"Read-only store: {type(node).__name__} statements are not permitted.")
+        if isinstance(node, exp.Select) and node.args.get("into"):
+            raise PermissionError("Read-only store: SELECT INTO is not permitted.")
         if isinstance(node, exp.Table):
             db_part = (node.args.get("db") or node.args.get("catalog") or exp.Identifier(this="")).name
             tbl_part = node.name
@@ -55,6 +79,36 @@ def _assert_select_only(sql: str) -> None:
                 raise PermissionError(
                     f"Read-only store: access to '{db_part or tbl_part}' is not permitted."
                 )
+        if isinstance(node, exp.Column) and node.name.lower() in _BLOCKED_COLUMNS:
+            raise PermissionError(
+                f"Read-only store: column '{node.name}' is not permitted. "
+                "Select other columns, or use SELECT * if you need the full row."
+            )
+
+
+def _set_lock_timeout(dbapi_conn, lock_timeout_ms: int) -> None:
+    cur = dbapi_conn.cursor()
+    try:
+        cur.execute(f"SET LOCK_TIMEOUT {lock_timeout_ms}")
+        dbapi_conn.commit()
+    finally:
+        cur.close()
+
+
+def _apply_lock_timeout(engine: Engine) -> None:
+    """Bound how long a query waits on a lock before failing.
+
+    SQL Server has no session-level read-only mode — that guarantee has to
+    come from the login/role granted in the DSN (grant only db_datareader).
+    LOCK_TIMEOUT is a second, independent guard this app *can* enforce from
+    the connection itself: even a misconfigured or overly-privileged login
+    can't hang the connection pool waiting on another session's lock.
+    """
+    lock_timeout_ms = int(os.environ.get("SQL_LOCK_TIMEOUT_MS", "5000"))
+
+    @event.listens_for(engine, "connect")
+    def _on_connect(dbapi_conn, _record):  # noqa: ANN001
+        _set_lock_timeout(dbapi_conn, lock_timeout_ms)
 
 
 def _build_engine(database: str) -> Engine:
@@ -76,7 +130,7 @@ def _build_engine(database: str) -> Engine:
             f"UID={username};PWD={password};TrustServerCertificate=yes;"
         )
     url = f"mssql+pyodbc:///?odbc_connect={quote_plus(dsn)}"
-    return create_engine(
+    engine = create_engine(
         url,
         poolclass=QueuePool,
         pool_size=pool_size,
@@ -84,6 +138,8 @@ def _build_engine(database: str) -> Engine:
         pool_pre_ping=True,
         connect_args={"timeout": timeout},
     )
+    _apply_lock_timeout(engine)
+    return engine
 
 
 class _TTLCache:
@@ -144,6 +200,8 @@ class SQLDataStore:
         _sql_ttl     = int(os.environ.get("SQL_CACHE_TTL", "300"))
         _sql_maxsize = int(os.environ.get("SQL_CACHE_MAX_SIZE", "512"))
         self._cache  = _TTLCache(ttl=_sql_ttl, maxsize=_sql_maxsize)
+        _catalog_ttl = int(os.environ.get("SQL_IDENTIFIER_CATALOG_TTL", "3600"))
+        self._catalog_cache = _TTLCache(ttl=_catalog_ttl, maxsize=len(self._databases) or 1, name="identifier_catalog")
 
     @staticmethod
     def _q(name: str) -> str:
@@ -198,6 +256,9 @@ class SQLDataStore:
             return f"AND {dc} >= (SELECT DATEADD(dd,-7,MAX({dc})) FROM {t})"
         if period == "last_30_days":
             return f"AND {dc} >= (SELECT DATEADD(dd,-30,MAX({dc})) FROM {t})"
+        if period == "prior_7_days":
+            return (f"AND {dc} >= (SELECT DATEADD(dd,-14,MAX({dc})) FROM {t}) "
+                    f"AND {dc} <  (SELECT DATEADD(dd,-7,MAX({dc})) FROM {t})")
         if period == "prior_30_days":
             return (f"AND {dc} >= (SELECT DATEADD(dd,-60,MAX({dc})) FROM {t}) "
                     f"AND {dc} <  (SELECT DATEADD(dd,-30,MAX({dc})) FROM {t})")
@@ -246,8 +307,33 @@ class SQLDataStore:
         with contextlib.closing(self._engines[target_db].raw_connection()) as conn:
             return pd.read_sql(sql, conn, params=params or None)
 
+    def _schema_catalog(self, database: str) -> SchemaCatalog:
+        """Cached table/column catalog for `validate_identifiers`. Failing to
+        build it (e.g. a permissions issue reading INFORMATION_SCHEMA) must
+        not break query execution — an empty catalog just skips identifier
+        validation, leaving `_assert_select_only` and the DB role as the
+        remaining guards."""
+        cache_key = f"catalog:{database}"
+        cached = self._catalog_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        try:
+            cols_df = self.schema_columns(database)
+            grouped: dict[str, list[str]] = {}
+            for _, row in cols_df.iterrows():
+                table = f"{row['TABLE_SCHEMA']}.{row['TABLE_NAME']}"
+                grouped.setdefault(table, []).append(row["COLUMN_NAME"])
+            catalog = SchemaCatalog.from_rows(list(grouped.items()))
+        except Exception:
+            catalog = SchemaCatalog()
+        self._catalog_cache.set(cache_key, catalog)
+        return catalog
+
     def _query(self, sql: str, params: tuple = (), database: str | None = None) -> pd.DataFrame:
         _assert_select_only(sql)
+        if os.environ.get("SQL_IDENTIFIER_GUARD", "true").lower() != "false":
+            target_db = database or self._primary_db
+            validate_identifiers(sql.replace("?", "NULL"), self._schema_catalog(target_db))
         return self._exec(sql, params, database)
 
     def schema_columns(self, database: str) -> pd.DataFrame:
@@ -311,7 +397,7 @@ class SQLDataStore:
             "date_range":            {"from": str(row["date_from"]), "to": str(row["date_to"])},
             "metric_rate":           float(row["metric_rate"]),
             "below_threshold_count": int(row["below_threshold_count"]),
-            "dimensions":            dims_df[first_dim].tolist() if first_dim and not dims_df.empty else [],  # noqa: E501
+            "dimensions":            dims_df.iloc[:, 0].tolist() if first_dim and not dims_df.empty else [],  # noqa: E501
         }
         self._cache.set("summary:all", result)
         return result
@@ -359,12 +445,12 @@ class SQLDataStore:
             ROUND(100.0*SUM(CASE WHEN {mc}=? THEN 1 ELSE 0 END)
                 /NULLIF(COUNT(*),0),1)                                        AS metric_rate
         FROM {t}
-        WHERE 1=1
+        WHERE {col_expr} IS NOT NULL
         {period_clause}
         {segment_clause}
         GROUP BY {col_expr}
         """, params=tuple(params))
-        if group_by in self._group_cols and col_alias != "class":
+        if col_alias not in ("week", "month", "day_of_week", "class"):
             result = result.rename(columns={col_alias: "class"})
         self._cache.set(cache_key, result)
         return result
@@ -418,6 +504,11 @@ class SQLDataStore:
             /NULLIF(COUNT(*),0),1) < ?
         ORDER BY metric_rate ASC
         """, params=tuple(params))
+        if "group_name" in result.columns:
+            result["group_name"] = pd.Series(
+                [None if pd.isna(v) else v for v in result["group_name"]],
+                index=result.index, dtype=object,
+            )
         self._cache.set(cache_key, result)
         return result
 
@@ -499,17 +590,22 @@ class SQLDataStore:
 
     def get_top_n(
         self,
-        group_by:  str  = "",
-        n:         int  = 10,
-        ascending: bool = True,
-        period:    str  = "all",
-        segments:  list[str] | None = None,
-        date_from: str | None = None,
-        date_to:   str | None = None,
+        group_by:    str  = "",
+        n:           int  = 10,
+        ascending:   bool = True,
+        period:      str  = "all",
+        segments:    list[str] | None = None,
+        date_from:   str | None = None,
+        date_to:     str | None = None,
+        min_records: int = 1,
     ) -> pd.DataFrame:
         df = self.compute_stats(group_by, period, segments, date_from, date_to)
         if df.empty or "metric_rate" not in df.columns:
             return pd.DataFrame()
+        if min_records > 1 and "total" in df.columns:
+            df = df[df["total"] >= min_records]
+            if df.empty:
+                return pd.DataFrame()
         return (
             df.nsmallest(n, "metric_rate") if ascending
             else df.nlargest(n, "metric_rate")

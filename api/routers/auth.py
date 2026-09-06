@@ -7,9 +7,14 @@ from api.auth import (
 from api.deps import get_current_user, require_admin
 from api.limiter import limiter
 from api.models import CreateUserRequest, LoginRequest, Token, UserInfo
+from src.observability.audit import record_admin_action
 from src.security import UserContext
 
 router = APIRouter()
+
+
+def _client_ip(request: Request) -> str | None:
+    return request.client.host if request.client else None
 
 
 @router.post("/login", response_model=Token)
@@ -33,19 +38,21 @@ def get_users(_: UserContext = Depends(require_admin)):
 
 
 @router.post("/users", status_code=201)
-def add_user(body: CreateUserRequest, _: UserContext = Depends(require_admin)):
+def add_user(body: CreateUserRequest, request: Request, admin: UserContext = Depends(require_admin)):
     try:
         ok = create_user(body.username, body.password)
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
     if not ok:
         raise HTTPException(status_code=409, detail="Username already exists")
+    record_admin_action(admin.user_id, "user.create", target=body.username, client_ip=_client_ip(request))
     return {"message": f"User '{body.username}' created"}
 
 
 @router.delete("/users/{username}")
-def remove_user(username: str, _: UserContext = Depends(require_admin)):
+def remove_user(username: str, request: Request, admin: UserContext = Depends(require_admin)):
     ok = delete_user(username)
     if not ok:
         raise HTTPException(status_code=404, detail="User not found or cannot delete admin")
+    record_admin_action(admin.user_id, "user.delete", target=username, client_ip=_client_ip(request))
     return {"message": f"User '{username}' deleted"}

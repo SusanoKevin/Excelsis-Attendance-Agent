@@ -16,6 +16,7 @@ from langgraph.prebuilt import create_react_agent
 
 from .observability.trace import TracingQueryTracker as QueryTracker
 from .prompt_guard import check_token_budget
+from .retention import record_activity
 from .security import ADMIN_USER, UserContext
 from .tools import ALL_TOOLS
 
@@ -214,7 +215,9 @@ class ExcelsisAgent:
     def _prepare(self, message: str, user: UserContext | None) -> tuple[dict, list]:
         user = user or ADMIN_USER
         check_token_budget(message)
-        return self._build_config(user), [HumanMessage(content=message)]
+        config = self._build_config(user)
+        record_activity(config["configurable"]["thread_id"])
+        return config, [HumanMessage(content=message)]
 
     def ask(self, query: str, user: UserContext | None = None) -> str:
         config, messages = self._prepare(query, user)
